@@ -220,8 +220,8 @@ func runTest(t *testing.T, tt TestSpec, in Input, runtimeEnv []string) {
 		}
 
 		// cleanup cache
-		assert.NilError(t, exec.Command("docker", "buildx", "prune", "-f", "--keep-storage=10GB").Run())
-		assert.NilError(t, exec.Command("docker", "system", "prune").Run())
+		assert.NilError(t, exec.Command("docker", "buildx", "prune", "-f", "--keep-storage=11GB").Run())
+		assert.NilError(t, exec.Command("docker", "system", "prune", "-a").Run())
 	})
 }
 
