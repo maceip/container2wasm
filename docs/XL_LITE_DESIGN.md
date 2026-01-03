@@ -1646,3 +1646,215 @@ Total: ~8 weeks, ~3,000 LOC
 | `python script.py` | 2-3s | <500ms | Interpreter in memory |
 | Page refresh | Full reload | <1s | Snapshot + workspace persist |
 | Storage (256MB VM) | N/A | 100-150MB | Deduplication + compression |
+
+---
+
+## Drop-in Components from GitHub
+
+These existing projects can be used as drop-in replacements to reduce implementation effort:
+
+### Filesystem Layer
+
+| Component | Project | Stars | Use For |
+|-----------|---------|-------|---------|
+| **Overlay/Union FS** | [BrowserFS/ZenFS](https://github.com/jvilk/BrowserFS) | 3k+ | `MountableFileSystem` + `OverlayFS` for COW layer |
+| **OPFS + unionfs** | [memfs](https://github.com/streamich/memfs) | 1.5k+ | In-memory fs + OPFS adapter + unionfs |
+| **OPFS wrapper** | [@componentor/fs](https://www.npmjs.com/package/@componentor/fs) | - | Node.js-compatible OPFS, isomorphic-git ready |
+| **Sync OPFS** | [happy-opfs](https://github.com/aspect-build/aspect-cli) | - | Synchronous OPFS via SharedArrayBuffer |
+
+**Recommendation**: Use **memfs** for unionfs + OPFS adapter, or **ZenFS** (BrowserFS successor) for overlay support.
+
+```javascript
+// ZenFS OverlayFS example
+import { configure, OverlayFS, InMemory } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
+
+await configure({
+    mounts: {
+        '/': {
+            backend: OverlayFS,
+            readable: { backend: OPFS, handle: await navigator.storage.getDirectory() },
+            writable: { backend: InMemory }
+        }
+    }
+});
+```
+
+### Compression
+
+| Component | Project | Size | Speed | Use For |
+|-----------|---------|------|-------|---------|
+| **fflate** | [101arrowz/fflate](https://github.com/101arrowz/fflate) | 8-29KB | Fastest JS | Default compression |
+| **pako** | [nodeca/pako](https://github.com/nodeca/pako) | 45KB | Good | Compatible fallback |
+| **zstd-wasm** | [bokuweb/zstd-wasm](https://github.com/bokuweb/zstd-wasm) | 400KB | Best ratio | Large snapshots (XL) |
+| **wasm-flate** | [drbh/wasm-flate](https://github.com/drbh/wasm-flate) | WASM | 7x pako | High-performance |
+
+**Recommendation**: Start with **fflate** (smallest, fastest pure JS). Move to **zstd-wasm** for better compression ratios on large snapshots.
+
+```javascript
+// fflate example - 8KB gzipped
+import { gzip, gunzip } from 'fflate';
+
+const compressed = gzip(data);
+const decompressed = gunzip(compressed);
+```
+
+### Content-Addressed Storage / Deduplication
+
+| Component | Project | Use For |
+|-----------|---------|---------|
+| **Chunking** | [ronomon/deduplication](https://github.com/ronomon/deduplication) | Content-dependent chunking (1.5GB/s) |
+| **Rolling hash** | [loveencounterflow/buzhash-demo](https://github.com/loveencounterflow/buzhash-demo) | Variable-size chunk boundaries |
+
+**Note**: For XL-Lite's fixed-size chunks (4MB), we don't need rolling hash. Simple SHA-256 + fixed chunking is sufficient.
+
+### WASM State Serialization
+
+| Component | Project | Use For |
+|-----------|---------|---------|
+| **wasm-persist** | [dfinity-side-projects/wasm-persist](https://github.com/dfinity-side-projects/wasm-persist) | Orthogonally persistent WASM instances |
+| **wasmbox** | [jamsocket/wasmbox](https://github.com/jamsocket/wasmbox) | Serializable WASM state snapshots |
+| **v86 state.js** | [copy/v86](https://github.com/copy/v86/blob/master/src/state.js) | Production-tested VM state save/restore |
+
+**Recommendation**: Use **v86's state.js patterns** - already production-tested for x86 emulator state.
+
+```javascript
+// v86 pattern - already handles CPU, memory, devices
+CPU.prototype.save_state = function() {
+    return {
+        regs: this.reg32,
+        flags: this.flags,
+        memory: new Uint8Array(this.memory.buffer),
+        // ... device state
+    };
+};
+```
+
+### Tar/Archive Handling
+
+| Component | Project | Use For |
+|-----------|---------|---------|
+| **modern-tar** | [ayuhito/modern-tar](https://github.com/ayuhito/modern-tar) | Zero-dep streaming tar, Web Streams API |
+| **js-untar** | [InvokIT/js-untar](https://github.com/InvokIT/js-untar) | Browser tar extraction (Web Worker) |
+| **tar-stream** | [mafintosh/tar-stream](https://www.npmjs.com/package/tar-stream) | Node.js streaming tar |
+
+**Recommendation**: Use **modern-tar** for browser (zero-dep, Web Streams) or **js-untar** for simple extraction.
+
+```javascript
+// modern-tar example
+import { Untar } from 'modern-tar';
+import { gunzip } from 'fflate';
+
+const response = await fetch('layer.tar.gz');
+const decompressed = gunzip(new Uint8Array(await response.arrayBuffer()));
+const untar = new Untar(decompressed);
+
+for await (const entry of untar) {
+    console.log(entry.name, entry.size);
+    const content = await entry.read();
+}
+```
+
+### Git in Browser
+
+| Component | Project | Use For |
+|-----------|---------|---------|
+| **isomorphic-git** | [isomorphic-git/isomorphic-git](https://github.com/isomorphic-git/isomorphic-git) | Full git implementation |
+| **lightning-fs** | [isomorphic-git/lightning-fs](https://github.com/isomorphic-git/lightning-fs) | IndexedDB filesystem for git |
+
+**Recommendation**: Use **isomorphic-git** with **@componentor/fs** for OPFS-backed git repos in workspace.
+
+### Related: WebContainers
+
+StackBlitz's [WebContainers](https://github.com/stackblitz/webcontainer-core) provides a full browser-based Node.js runtime with:
+- Virtual file system in memory
+- Virtualized TCP network stack
+- Native npm/pnpm/yarn in browser
+- Security sandbox
+
+**Note**: WebContainers is proprietary (not open source core). But their architecture validates XL-Lite's approach:
+- OPFS for persistence
+- Virtual FS with overlay
+- SharedArrayBuffer for sync I/O
+
+---
+
+## Recommended Stack
+
+Based on the drop-in analysis, here's the recommended technology stack:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         XL-Lite Technology Stack                             │
+│                                                                              │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Application Layer                                                   │    │
+│  │  • XL-Lite Manager (custom)                                          │    │
+│  │  • Startup Optimizer (custom)                                        │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Snapshot Layer                                                      │    │
+│  │  • CAS: SHA-256 + fixed 4MB chunks (custom, simple)                 │    │
+│  │  • Compression: fflate (drop-in)                                     │    │
+│  │  • State serialization: v86 patterns (reference)                     │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Filesystem Layer                                                    │    │
+│  │  • Overlay: ZenFS OverlayFS (drop-in)                               │    │
+│  │  • OPFS: happy-opfs or @componentor/fs (drop-in)                    │    │
+│  │  • 9P server: v86 lib/9p.js (drop-in)                               │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  eStargz Layer                                                       │    │
+│  │  • Tar parsing: modern-tar (drop-in)                                 │    │
+│  │  • TOC format: custom (follows eStargz spec)                         │    │
+│  │  • HTTP Range: fetch API (native)                                    │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                    │                                         │
+│  ┌─────────────────────────────────────────────────────────────────────┐    │
+│  │  Storage Layer                                                       │    │
+│  │  • OPFS: FileSystemSyncAccessHandle (native)                        │    │
+│  │  • IndexedDB: fallback (native)                                      │    │
+│  │  • Service Worker: cache API (native)                                │    │
+│  └─────────────────────────────────────────────────────────────────────┘    │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Bundle Size Estimate
+
+| Component | Size (gzip) |
+|-----------|-------------|
+| fflate | 8KB |
+| ZenFS core + OPFS | ~15KB |
+| modern-tar | ~5KB |
+| v86 9p.js | ~10KB |
+| happy-opfs | ~8KB |
+| XL-Lite custom code | ~15KB |
+| **Total** | **~61KB** |
+
+Compare to: pako alone = 45KB, WebContainers = proprietary
+
+---
+
+## Code Reduction with Drop-ins
+
+| Component | Custom LOC | With Drop-in | Savings |
+|-----------|------------|--------------|---------|
+| OverlayFS | ~500 | ~50 (config) | 90% |
+| Compression | ~200 | ~10 (import) | 95% |
+| Tar parsing | ~400 | ~20 (import) | 95% |
+| 9P server | ~800 | ~100 (adapter) | 87% |
+| OPFS wrapper | ~300 | ~30 (import) | 90% |
+| **Total** | **~2,200** | **~210** | **90%** |
+
+Remaining custom code: ~800 LOC
+- XL-Lite Manager: ~300
+- CAS (simple): ~150
+- Prefetch engine: ~150
+- Startup optimizer: ~200
+
+**Final estimate: ~1,000 LOC custom + ~61KB dependencies**
