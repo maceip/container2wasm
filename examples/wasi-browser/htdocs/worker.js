@@ -274,16 +274,19 @@ self.onmessage = async (msg) => {
     self.handle9PMessage = handle9PMessage;
 
     var ttyClient = new TtyClient(msg.data);
-    
-    const opfsRootDir = new OPFSDirectory(s1, '/');
-    
+
+    // M1 filesystem: OPFS-backed directory for guest 9P mount
+    const m1 = getM1Filesystem();
+    const opfsDir = new OPFSDirectory(m1, '/');
+
     var args = [];
     var env = [];
     var fds = [
         new OpenFile(new File([])), // stdin
         new OpenFile(new File([])), // stdout
         new OpenFile(new File([])), // stderr
-        new PreopenDirectory("/", opfsRootDir), // S1: OPFS-backed root
+        // fd 3: /opfs - OPFS-backed directory for guest 9P access via virtfs
+        new PreopenDirectory("/opfs", opfsDir),
     ];
 
     var netParam = getNetParam();
