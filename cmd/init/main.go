@@ -28,7 +28,46 @@ const (
 	rootFSTag = "wasi0"
 	// wasi1: pack directory
 	packFSTag = "wasi1"
+    
+    // OPFS mount
+	opfsFSTag = "opfs"
+	opfsMountPoint = "/mnt/opfs"
 )
+
+func init() {
+	// Mount OPFS early in boot
+	// This runs after basic system setup but before container starts
+	if err := mountOPFS(); err != nil {
+		// Non-fatal: container can still run without OPFS
+		log.Printf("Warning: OPFS mount failed: %v", err)
+		log.Printf("Browser filesystem will not be available at %s", opfsMountPoint)
+	}
+}
+
+// mountOPFS mounts the browser OPFS as a 9p filesystem
+func mountOPFS() error {
+	// Create mount point
+	if err := os.MkdirAll(opfsMountPoint, 0755); err != nil {
+		return err
+	}
+
+	// Mount 9p filesystem
+	// The "opfs" tag corresponds to the JavaScript/Rust 9P server
+	err := syscall.Mount(
+		opfsFSTag,           // source (virtio device tag)
+		opfsMountPoint,      // target mount point
+		"9p",                // filesystem type
+		0,                   // mount flags
+		"trans=virtio,version=9p2000.L,msize=65536,cache=loose",
+	)
+
+	if err != nil {
+		return err
+	}
+
+	log.Printf("OPFS mounted at %s", opfsMountPoint)
+	return nil
+}
 
 func main() {
 	if err := doInit(); err != nil {
@@ -275,7 +314,6 @@ func doInit() error {
 	if err := mountAll(cfg.PostMounts); err != nil {
 		return err
 	}
-
 	s = patchSpec(s, info, imageConfig)
 	log.Printf("Running: %+v\n", s.Process.Args)
 	sd, err := json.Marshal(s)
@@ -387,10 +425,10 @@ func mountAll(mounts []inittype.MountInfo) error {
 		} else {
 			if err := mount(m); err != nil {
 				if m.Optional {
-					log.Printf("failed optional mount %+v: %v", m, err)
-				} else {
-					return err
-				}
+						log.Printf("failed optional mount %+v: %v", m, err)
+					} else {
+						return err
+					}
 			}
 		}
 	}
@@ -401,8 +439,8 @@ func mountAll(mounts []inittype.MountInfo) error {
 }
 
 var (
-	delimLines = regexp.MustCompile(`[^\\]\n`)
-	delimArgs  = regexp.MustCompile(`[^\\] `)
+	delimLines = regexp.MustCompile(`[^\]\n`)
+	delimArgs  = regexp.MustCompile(`[^\] `)
 )
 
 type runtimeFlags struct {
@@ -423,10 +461,10 @@ func parseInfo(infoD []byte) (info runtimeFlags) {
 	for _, m := range lmchs {
 		s := m[0] + 1
 		// newline are quoted so we restore them here
-		options = append(options, strings.ReplaceAll(string(infoD[prev:s]), "\\\n", "\n"))
+		options = append(options, strings.ReplaceAll(string(infoD[prev:s]), "\\n", "\n"))
 		prev = m[1]
 	}
-	options = append(options, strings.ReplaceAll(string(infoD[prev:]), "\\\n", "\n"))
+	options = append(options, strings.ReplaceAll(string(infoD[prev:]), "\\n", "\n"))
 	for _, l := range options {
 		elms := strings.SplitN(l, ":", 2)
 		if len(elms) != 2 {

@@ -119,10 +119,10 @@ RUN mkdir -p /out/oci/rootfs /out/oci/bundle && \
     EXTERNAL_BUNDLE_F=false && \
     if test "${EXTERNAL_BUNDLE}" = "true" ; then EXTERNAL_BUNDLE_F=true ; fi && \
     create-spec --debug=${INIT_DEBUG} --debug-init=${IS_WIZER} --no-vmtouch=${NO_VMTOUCH_F} --external-bundle=${EXTERNAL_BUNDLE_F} --no-binfmt=${NO_BINFMT_F} \
-                --image-config-path=/oci/image.json \
-                --runtime-config-path=/oci/spec.json \
-                --rootfs-path=/oci/rootfs \
-                /oci "${TARGETPLATFORM}" /out/oci/rootfs
+    --image-config-path=/oci/image.json \
+    --runtime-config-path=/oci/spec.json \
+    --rootfs-path=/oci/rootfs \
+    /oci "${TARGETPLATFORM}" /out/oci/rootfs
 RUN if test -f image.json; then mv image.json /out/oci/ ; fi && \
     if test -f spec.json; then mv spec.json /out/oci/ ; fi
 RUN mv initconfig.json /out/oci/
@@ -336,6 +336,17 @@ FROM js-tinyemu AS js-i386
 FROM js-tinyemu AS js-mips64
 FROM js-tinyemu AS js-ppc64le
 FROM js-tinyemu AS js-s390
+
+# ============================================================
+# OPFS L1: Rust 9P Server Build Stage
+# ============================================================
+FROM rustlang/rust:nightly-bullseye AS opfs-9p-build
+RUN curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+RUN rustup target add wasm32-unknown-unknown
+RUN cargo install wasm-bindgen-cli --version 0.2.106
+COPY --from=assets /extras/opfs-9p-server /build/opfs-9p-server
+WORKDIR /build/opfs-9p-server
+RUN wasm-pack build --target web --release
 
 FROM scratch AS wasi-tinyemu
 COPY --link --from=tinyemu-dev-packed /out/ /
@@ -749,7 +760,7 @@ RUN apt-get update && apt-get install -y gettext-base && mkdir /out
 COPY --link --from=assets /config/qemu/args-x86_64.json.template /args.json.template
 RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
-      MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
+    MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
@@ -766,7 +777,7 @@ RUN apt-get update && apt-get install -y gettext-base && mkdir /out
 COPY --link --from=assets /config/qemu/args-aarch64.json.template /args.json.template
 RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
-      MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
+    MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
@@ -783,7 +794,7 @@ RUN apt-get update && apt-get install -y gettext-base && mkdir /out
 COPY --link --from=assets /config/qemu/args-riscv64.json.template /args.json.template
 RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
-      MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
+    MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
     cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
@@ -866,17 +877,17 @@ RUN EXTRA_CFLAGS="-O3 -g -Wno-error=unused-command-line-argument -matomics -mbul
     emmake make -j $(nproc) qemu-system-x86_64
 COPY --from=qemu-x86_64-pack /pack /pack
 RUN if test "${LOAD_MODE}" = "single" ; then \
-      /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-x86_64.data --preload /pack > load.js ; \
+    /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-x86_64.data --preload /pack > load.js ; \
     else \
-      mkdir /load && \
-      mkdir /image && cp /pack/bzImage /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
-      mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
-      mkdir /bios && \
-      cp /pack/bios-256k.bin /bios/ && \
-      cp /pack/kvmvapic.bin /bios/ && \
-      cp /pack/linuxboot_dma.bin /bios/ && \
-      cp /pack/vgabios-stdvga.bin /bios/ && \
-      /emsdk/upstream/emscripten/tools/file_packager.py /load/bios.data --preload /bios > /load/bios-load.js ; \
+    mkdir /load && \
+    mkdir /image && cp /pack/bzImage /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
+    mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
+    mkdir /bios && \
+    cp /pack/bios-256k.bin /bios/ && \
+    cp /pack/kvmvapic.bin /bios/ && \
+    cp /pack/linuxboot_dma.bin /bios/ && \
+    cp /pack/vgabios-stdvga.bin /bios/ && \
+    /emsdk/upstream/emscripten/tools/file_packager.py /load/bios.data --preload /bios > /load/bios-load.js ; \
     fi
 
 FROM scratch AS js-qemu-amd64-base
@@ -903,12 +914,12 @@ RUN EXTRA_CFLAGS="-O3 -fno-inline-functions -g -Wno-error=unused-command-line-ar
     emmake make -j $(nproc) qemu-system-aarch64
 COPY --from=qemu-aarch64-pack /pack /pack
 RUN if test "${LOAD_MODE}" = "single" ; then \
-      /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-aarch64.data --preload /pack > load.js ; \
+    /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-aarch64.data --preload /pack > load.js ; \
     else \
-      mkdir /load && \
-      mkdir /image && cp /pack/bzImage /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
-      mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
-      mkdir /edk2 && cp /pack/edk2-aarch64-code.fd /edk2/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/edk2.data --preload /edk2 > /load/edk2-load.js ; \
+    mkdir /load && \
+    mkdir /image && cp /pack/bzImage /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
+    mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
+    mkdir /edk2 && cp /pack/edk2-aarch64-code.fd /edk2/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/edk2.data --preload /edk2 > /load/edk2-load.js ; \
     fi
 
 FROM scratch AS js-qemu-aarch64-base
@@ -935,12 +946,12 @@ RUN EXTRA_CFLAGS="-O3 -g -Wno-error=unused-command-line-argument -matomics -mbul
     emmake make -j $(nproc) qemu-system-riscv64
 COPY --from=qemu-riscv64-pack /pack /pack
 RUN if test "${LOAD_MODE}" = "single" ; then \
-      /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-riscv64.data --preload /pack > load.js ; \
+    /emsdk/upstream/emscripten/tools/file_packager.py qemu-system-riscv64.data --preload /pack > load.js ; \
     else \
-      mkdir /load && \
-      mkdir /image && cp /pack/Image /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
-      mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
-      mkdir /bios && cp /pack/opensbi-riscv64-generic-fw_dynamic.bin /bios/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/bios.data --preload /bios > /load/bios-load.js ; \
+    mkdir /load && \
+    mkdir /image && cp /pack/Image /image/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/image.data --preload /image > /load/image-load.js && \
+    mkdir /rootfs && cp /pack/rootfs.bin /rootfs/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/rootfs.data --preload /rootfs > /load/rootfs-load.js && \
+    mkdir /bios && cp /pack/opensbi-riscv64-generic-fw_dynamic.bin /bios/ && /emsdk/upstream/emscripten/tools/file_packager.py /load/bios.data --preload /bios > /load/bios-load.js ; \
     fi
 
 FROM scratch AS js-qemu-riscv64-base
@@ -1064,3 +1075,21 @@ FROM js-qemu-amd64 AS js-amd64
 FROM js-$TARGETARCH AS js
 
 FROM wasi-$TARGETARCH
+
+# ============================================================
+# Final OPFS Integrated Image
+# This stage assembles a complete htdocs for wasi-browser
+# ============================================================
+FROM scratch AS opfs-integrated-htdocs
+# Copy base wasi-browser htdocs files (from assets)
+COPY --from=assets /examples/wasi-browser/htdocs/ /htdocs/
+# Copy L1 Rust server
+COPY --from=opfs-9p-build /build/opfs-9p-server/pkg /htdocs/opfs-9p-server/
+# Copy M1 JS 9P server files (vendored or from a build stage)
+# NOTE: Vendoring these is assumed by the plan.
+# If not vendored, they would need to be cloned in a stage.
+# COPY --from=some-v86-stage /v86/lib/9p.js /htdocs/
+
+# Helper stage to export assembled htdocs with OPFS assets
+FROM opfs-integrated-htdocs AS opfs-htdocs-final
+COPY --from=opfs-integrated-htdocs /htdocs/ /htdocs/

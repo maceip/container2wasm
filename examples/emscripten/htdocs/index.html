@@ -12,6 +12,9 @@
       import 'https://unpkg.com/xterm-pty/index.js';
       import './arg-module.js'
       import initEmscriptenModule from './out.js';
+      import { OPFSFilesystem } from './opfs-fs-backend.js';
+      import { Virtio9p } from './9p.js';
+      import { connectSyncAgent } from 'https://esm.sh/happy-opfs@latest';
 
       const xterm = new Terminal();
       xterm.open(document.getElementById("terminal"));
@@ -65,8 +68,27 @@ env: HTTP_PROXY=http://192.168.127.253:80`;
               mod.FS.writeFile('/pack/info', info);
           });
           (async () => {
+              // Initialize OPFS for 9P server
+              const opfsWorkerUrl = new URL('./opfs-worker.js', import.meta.url);
+              await connectSyncAgent(opfsWorkerUrl);
+              const opfsFs = new OPFSFilesystem('/shared'); // Mounts /shared from OPFS
+
               const instance = await initEmscriptenModule(Module);
               
+              // This is the tricky part. The plan assumes a v86-like bus.
+              // QEMU-WASM might not have `instance.bus`.
+              // We'll need to find the correct way to connect virtio.
+              // For now, we'll try to instantiate it, assuming it will fail
+              // but demonstrating the intent.
+              if (instance.bus) {
+                  const virtio9p = new Virtio9p(opfsFs, instance.cpu, instance.bus);
+                  // v86's 9p.js registers itself as a virtio device.
+                  // It uses a device tag "host9p". We might need to change it to "opfs".
+                  // TODO: Check QEMU-WASM virtio device registration from JS.
+              } else {
+                  console.warn("L1/M1 Integration: Could not find `instance.bus`. 9P OPFS share is not active.");
+              }
+
               var oldPoll = Module['TTY'].stream_ops.poll;
               var pty = Module['pty'];
               Module['TTY'].stream_ops.poll = function(stream, timeout){

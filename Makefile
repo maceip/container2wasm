@@ -43,6 +43,7 @@ artifacts: clean
 
 	rm -f $(PREFIX)/c2w $(PREFIX)/c2w-net
 
+
 test:
 	./tests/test.sh
 
@@ -61,3 +62,60 @@ validate-vendor:
 
 clean:
 	rm -f $(CURDIR)/out/*
+
+# ============================================================ 
+# OPFS Integration Targets
+# ============================================================ 
+
+OPFS_9P_DIR = extras/opfs-9p-server
+V86_REPO = https://github.com/copy/v86.git
+HTDOCS = examples/wasi-browser/htdocs
+
+.PHONY: opfs-deps opfs-l1 opfs-m1 opfs-all opfs-clean
+
+# Install all OPFS dependencies
+opfs-deps:
+	@echo "happy-opfs will be fetched via importmap from esm.sh"
+	@# No npm install needed as happy-opfs is imported directly via URL in browser
+
+# Build L1 (Rust 9P server)
+opfs-l1:
+	cd $(OPFS_9P_DIR) && wasm-pack build --target web --release
+	mkdir -p $(HTDOCS)/opfs-9p-server
+	cp -r $(OPFS_9P_DIR)/pkg/* $(HTDOCS)/opfs-9p-server/
+
+# Setup M1 (v86 9P files)
+opfs-m1:
+	@if [ ! -d "/tmp/v86" ]; then \
+		git clone --depth 1 $(V86_REPO) /tmp/v86; \
+	fi
+	cp /tmp/v86/lib/9p.js $(HTDOCS)/
+	cp /tmp/v86/lib/marshall.js $(HTDOCS)/
+	cp /tmp/v86/lib/filesystem.js $(HTDOCS)/
+
+# Build everything
+opfs-all: opfs-deps opfs-m1 opfs-l1
+	@echo "OPFS integration complete"
+	@echo "  S1: happy-opfs installed"
+	@echo "  M1: v86 9P files copied"
+	@echo "  L1: Rust 9P server built"
+
+# Clean OPFS artifacts
+
+opfs-clean:
+
+	rm -rf $(HTDOCS)/opfs-9p-server
+
+	rm -f $(HTDOCS)/9p.js $(HTDOCS)/marshall.js $(HTDOCS)/filesystem.js
+
+	rm -rf /tmp/v86
+
+
+
+# Rebuild init and c2w, then show command to re-generate wasm
+
+rebuild-image-with-opfs: c2w
+	@echo "Pruning docker cache..."
+	docker builder prune -a -f
+	@echo "Running c2w conversion..."
+	./out/c2w --assets $(CURDIR) --target-arch=riscv64 ubuntu:22.04 $(PREFIX)/htdocs

@@ -2,7 +2,7 @@ var streamCtrl;
 var streamStatus;
 var streamLen;
 var streamData;
-function registerSocketBuffer(shared){
+export function registerSocketBuffer(shared){
     streamCtrl = new Int32Array(shared, 0, 1);
     streamStatus = new Int32Array(shared, 4, 1);
     streamLen = new Int32Array(shared, 8, 1);
@@ -10,7 +10,7 @@ function registerSocketBuffer(shared){
 }
 
 var imagename;
-function serveIfInitMsg(msg) {
+export function serveIfInitMsg(msg) {
     const req_ = msg.data;
     if (typeof req_ == "object"){
         if (req_.type == "init") {
@@ -26,21 +26,21 @@ function serveIfInitMsg(msg) {
     return false;
 }
 
-function getImagename() {
+export function getImagename() {
     return imagename;
 }
 
-const errStatus = {
+export const errStatus = {
     val: 0,
 };
 
-function sockAccept(){
+export function sockAccept(){
     streamCtrl[0] = 0;
     postMessage({type: "accept"});
     Atomics.wait(streamCtrl, 0, 0);
     return streamData[0] == 1;
 }
-function sockSend(data){
+export function sockSend(data){
     streamCtrl[0] = 0;
     postMessage({type: "send", buf: data});
     Atomics.wait(streamCtrl, 0, 0);
@@ -49,7 +49,7 @@ function sockSend(data){
         return errStatus;
     }
 }
-function sockRecv(len){
+export function sockRecv(len){
     streamCtrl[0] = 0;
     postMessage({type: "recv", len: len});
     Atomics.wait(streamCtrl, 0, 0);
@@ -62,7 +62,7 @@ function sockRecv(len){
     return res;
 }
 
-function sockWaitForReadable(timeout){
+export function sockWaitForReadable(timeout){
     streamCtrl[0] = 0;
     postMessage({type: "recv-is-readable", timeout: timeout});
     Atomics.wait(streamCtrl, 0, 0);
@@ -73,7 +73,7 @@ function sockWaitForReadable(timeout){
     return streamData[0] == 1;
 }
 
-function sendCert(data){
+export function sendCert(data){
     streamCtrl[0] = 0;
     postMessage({type: "send_cert", buf: data});
     Atomics.wait(streamCtrl, 0, 0);
@@ -83,7 +83,7 @@ function sendCert(data){
     }
 }
 
-function recvCert(){
+export function recvCert(){
     var buf = new Uint8Array(0);
     return new Promise((resolve, reject) => {
         function getCert(){
@@ -114,7 +114,7 @@ function appendData(data1, data2) {
     return buf2;
 }
 
-function getCertDir(cert) {
+export function getCertDir(cert) {
     var certDir = new PreopenDirectory("/.wasmenv", {
         "proxy.crt": new File(cert)
     });
@@ -143,7 +143,7 @@ function getCertDir(cert) {
     return certDir;
 }
 
-function wasiHackSocket(wasi, listenfd, connfd) {
+export function wasiHackSocket(wasi, listenfd, connfd) {
     // definition from wasi-libc https://github.com/WebAssembly/wasi-libc/blob/wasi-sdk-19/expected/wasm32-wasi/predefined-macros.txt
     const ERRNO_INVAL = 28;
     const ERRNO_AGAIN= 6;
