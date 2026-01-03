@@ -1858,3 +1858,306 @@ Remaining custom code: ~800 LOC
 - Startup optimizer: ~200
 
 **Final estimate: ~1,000 LOC custom + ~61KB dependencies**
+
+---
+
+## Impact on OPFS S1/M1/L1 Projects
+
+The drop-in components significantly change the S1/M1/L1 implementation strategy:
+
+### Before: Original Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Original S1/M1/L1 Design                             │
+│                                                                              │
+│  S1: Emulator WASI → OPFS                                                    │
+│      └── happy-opfs (sync wrapper)                                           │
+│          └── Custom OPFSDirectory/OPFSFile classes                           │
+│                                                                              │
+│  M1: Guest 9P → OPFS (JavaScript)                                            │
+│      └── v86 lib/9p.js (9P protocol)                                         │
+│          └── Custom OPFSFilesystem adapter (~80 LOC)                         │
+│              └── happy-opfs (sync wrapper)                                   │
+│                                                                              │
+│  L1: Guest 9P → OPFS (Rust)                                                  │
+│      └── Custom Rust 9P server (~1,500 LOC)                                  │
+│          └── tokio-fs-ext (native sync OPFS)                                 │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### After: With Drop-ins
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Revised S1/M1/L1 Design                              │
+│                                                                              │
+│  S1: Emulator WASI → OPFS                                                    │
+│      └── ZenFS with OPFS backend (drop-in)                                   │
+│          └── Node.js fs-compatible API                                       │
+│          └── Built-in OverlayFS support                                      │
+│                                                                              │
+│  M1: Guest 9P → OPFS (JavaScript)                                            │
+│      └── v86 lib/9p.js (9P protocol, drop-in)                               │
+│          └── ZenFS OverlayFS (drop-in)                                      │
+│              ├── readable: eStargz base layer                                │
+│              └── writable: OPFS workspace                                    │
+│                                                                              │
+│  L1: Guest 9P → OPFS (Rust) - OPTIONAL now                                  │
+│      └── May not be needed if M1 + ZenFS is fast enough                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Detailed Impact Analysis
+
+#### S1: Emulator WASI → OPFS
+
+| Aspect | Original | With Drop-ins |
+|--------|----------|---------------|
+| **Sync wrapper** | happy-opfs (custom integration) | ZenFS OPFS backend or @componentor/fs |
+| **FS API** | Custom OPFSDirectory/OPFSFile | Standard Node.js fs API |
+| **Git support** | Would need separate integration | @componentor/fs is "isomorphic-git ready" |
+| **Overlay support** | Not included | Built into ZenFS |
+| **LOC** | ~200 | ~30 (config only) |
+
+**Recommendation**: Replace happy-opfs with **@componentor/fs** for S1:
+- Node.js `fs/promises` compatible
+- Works with isomorphic-git out of the box
+- Simpler integration
+
+```javascript
+// Before (happy-opfs)
+import { readFileSync, writeFileSync } from 'happy-opfs';
+const data = readFileSync('/path').unwrap();
+
+// After (@componentor/fs)
+import OPFS from '@componentor/fs';
+const fs = new OPFS({ workerUrl: '...' });
+await fs.ready();
+const data = await fs.readFile('/path');
+```
+
+#### M1: Guest 9P → OPFS (JavaScript)
+
+| Aspect | Original | With Drop-ins |
+|--------|----------|---------------|
+| **9P server** | v86 lib/9p.js | v86 lib/9p.js (same) |
+| **FS backend** | Custom OPFSFilesystem adapter | ZenFS OverlayFS |
+| **COW layer** | Would need custom implementation | Built into ZenFS OverlayFS |
+| **Base layer** | Not supported | Read from eStargz cache |
+| **LOC** | ~80 adapter + ~500 COW | ~50 (config only) |
+
+**Recommendation**: Use **ZenFS OverlayFS** as the filesystem backend for v86's 9p.js:
+
+```javascript
+// Before: Custom adapter
+class OPFSFilesystem {
+    constructor(rootPath) {
+        this.rootPath = rootPath;
+        mkdirSync(rootPath);
+    }
+    read(path, offset, length) { /* 20 lines */ }
+    write(path, data, offset) { /* 15 lines */ }
+    // ... 50 more lines
+}
+
+// After: ZenFS drop-in
+import { configure, OverlayFS } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
+
+await configure({
+    mounts: {
+        '/': {
+            backend: OverlayFS,
+            readable: eStargzBaseFS,   // Immutable base from CDN
+            writable: await OPFS.create({ handle: await navigator.storage.getDirectory() })
+        }
+    }
+});
+
+// v86 9p.js uses standard fs API - ZenFS provides it
+import { fs } from '@zenfs/core';
+const virtio9p = new Virtio9p(fs);  // Works directly!
+```
+
+#### L1: Guest 9P → OPFS (Rust)
+
+| Aspect | Original | With Drop-ins |
+|--------|----------|---------------|
+| **Need** | Performance critical path | May be unnecessary |
+| **Complexity** | ~1,500 LOC Rust | Skip entirely |
+| **Build** | wasm-pack, separate WASM | None |
+
+**Recommendation**: **Defer L1** until M1 + ZenFS is proven insufficient:
+
+1. ZenFS uses native browser APIs (including OPFS)
+2. Performance difference may be negligible for dev workloads
+3. Rust WASM adds build complexity
+4. If needed later, L1 can still be added
+
+### Revised Project Scope
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Revised Implementation Plan                          │
+│                                                                              │
+│  BEFORE                              AFTER                                   │
+│  ──────                              ─────                                   │
+│                                                                              │
+│  S1: ~200 LOC                        S1: ~30 LOC (config)                   │
+│      happy-opfs integration              @componentor/fs or ZenFS OPFS      │
+│      Custom Directory/File                                                   │
+│                                                                              │
+│  M1: ~580 LOC                        M1: ~50 LOC (config)                   │
+│      Custom OPFSFilesystem               ZenFS OverlayFS                    │
+│      Custom COW layer                    v86 9p.js (unchanged)              │
+│                                                                              │
+│  L1: ~1,500 LOC                      L1: DEFERRED                           │
+│      Full Rust 9P server                 Revisit if M1 too slow             │
+│      tokio-fs-ext                                                            │
+│                                                                              │
+│  ──────────────────────────────────────────────────────────────────────────  │
+│  Total: ~2,280 LOC                   Total: ~80 LOC                         │
+│                                      Reduction: 96%                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Key Architecture Changes
+
+#### 1. Unified FS Layer
+
+Instead of separate S1/M1 implementations, use single ZenFS instance:
+
+```javascript
+// Single filesystem configuration for both S1 and M1
+import { configure, OverlayFS, InMemory } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
+
+const opfsHandle = await navigator.storage.getDirectory();
+
+await configure({
+    mounts: {
+        // S1: Emulator's own storage (snapshots, config)
+        '/emulator': { backend: OPFS, handle: opfsHandle.getDirectory('emulator') },
+
+        // M1: Guest VM overlay (base + workspace)
+        '/guest': {
+            backend: OverlayFS,
+            readable: eStargzBaseLayer,  // Read-only base
+            writable: { backend: OPFS, handle: opfsHandle.getDirectory('workspace') }
+        }
+    }
+});
+```
+
+#### 2. v86 9p.js Integration
+
+v86's 9p.js expects a filesystem with standard operations. ZenFS provides exactly this:
+
+```javascript
+import { Virtio9p } from './9p.js';
+import { fs } from '@zenfs/core';
+
+// ZenFS fs module is Node.js compatible
+// v86 9p.js can use it directly
+class ZenFS9PBackend {
+    read(path, offset, length) {
+        const buffer = Buffer.alloc(length);
+        const fd = fs.openSync(path, 'r');
+        fs.readSync(fd, buffer, 0, length, offset);
+        fs.closeSync(fd);
+        return buffer;
+    }
+
+    write(path, data, offset) {
+        const fd = fs.openSync(path, 'a');
+        fs.writeSync(fd, data, 0, data.length, offset);
+        fs.closeSync(fd);
+        return data.length;
+    }
+
+    // ... other ops map directly to fs.*Sync methods
+}
+```
+
+#### 3. eStargz as Read-Only Base
+
+ZenFS OverlayFS readable layer can be backed by eStargz:
+
+```javascript
+class EStargzReadOnlyFS {
+    constructor(layerManager) {
+        this.layers = layerManager;  // EStargzLayerManager from XL-Lite
+    }
+
+    readFileSync(path) {
+        return this.layers.getFileSync(path);  // Lazy load from CDN/cache
+    }
+
+    existsSync(path) {
+        return this.layers.exists(path);
+    }
+
+    // Read-only: write operations throw
+    writeFileSync() { throw new Error('Read-only filesystem'); }
+}
+
+// Use as readable layer in OverlayFS
+await configure({
+    mounts: {
+        '/guest': {
+            backend: OverlayFS,
+            readable: new EStargzReadOnlyFS(eStargzManager),
+            writable: { backend: OPFS }
+        }
+    }
+});
+```
+
+### Updated Dependency List
+
+| Original Plan | New Plan | Change |
+|--------------|----------|--------|
+| happy-opfs | @componentor/fs or ZenFS | Replaced |
+| Custom OPFSFilesystem | ZenFS | Replaced |
+| Custom COW layer | ZenFS OverlayFS | Replaced |
+| tokio-fs-ext (Rust) | Deferred | Removed |
+| v86 lib/9p.js | v86 lib/9p.js | Kept |
+
+### Migration Path
+
+```
+Week 1: Replace S1
+├── Remove happy-opfs custom integration
+├── Add @zenfs/core + @zenfs/opfs
+├── Configure OPFS mount for /emulator
+└── Test emulator file operations
+
+Week 2: Replace M1
+├── Add ZenFS OverlayFS configuration
+├── Create EStargzReadOnlyFS adapter (~50 LOC)
+├── Wire v86 9p.js to use ZenFS backend
+└── Test guest filesystem operations
+
+Week 3: Integration
+├── End-to-end test: emulator + guest + persistence
+├── Performance benchmarking vs original plan
+└── Decide on L1 necessity
+```
+
+### Performance Consideration
+
+If M1 with ZenFS proves too slow for heavy I/O (unlikely for dev workloads), L1 can be added later:
+
+```
+Decision tree:
+1. Implement M1 with ZenFS
+2. Benchmark: file reads/writes, npm install, git operations
+3. If <100ms latency on typical ops → Keep M1, skip L1
+4. If >100ms latency → Implement L1 for hot paths only
+```
+
+Most Codex workloads (editing files, running tests, git) won't stress the I/O path enough to need Rust-level performance.

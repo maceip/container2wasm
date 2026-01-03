@@ -6,7 +6,19 @@ This document provides detailed implementation guidance for adding Origin Privat
 
 - **S1**: OPFS-backed WASI shim (browser filesystem access)
 - **M1**: OPFS-backed 9P server (guest VM filesystem passthrough)
-- **L1**: Native OPFS virtio device (direct guest access, optional future work)
+- **L1**: Native OPFS virtio device (direct guest access, **DEFERRED** - see note below)
+
+> **📋 REVISED ARCHITECTURE (2024)**
+>
+> Based on analysis of drop-in components (see [XL_LITE_DESIGN.md](./XL_LITE_DESIGN.md#impact-on-opfs-s1m1l1-projects)), this guide now recommends using **ZenFS** for both S1 and M1:
+>
+> | Phase | Original Approach | Revised Approach | LOC Reduction |
+> |-------|------------------|------------------|---------------|
+> | S1 | Custom happy-opfs integration | ZenFS OPFS backend | 200 → 30 (85%) |
+> | M1 | Custom OPFSFilesystem adapter | ZenFS OverlayFS | 580 → 50 (91%) |
+> | L1 | Rust 9P server | **DEFERRED** | 1,500 → 0 |
+>
+> Total: **96% code reduction** (~2,280 LOC → ~80 LOC)
 
 ## Prerequisites
 
@@ -15,13 +27,21 @@ This document provides detailed implementation guidance for adding Origin Privat
 - [FileSystemSyncAccessHandle](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemSyncAccessHandle)
 - [9P2000.L Protocol](https://github.com/chaos/diod/blob/master/protocol.md)
 - [container2wasm architecture](../README.md)
+- [XL-Lite Design (Drop-in Components)](./XL_LITE_DESIGN.md)
 
-### Key Dependencies
+### Key Dependencies (Revised)
 | Package | Purpose | Source |
 |---------|---------|--------|
-| happy-opfs | Sync OPFS API via SharedArrayBuffer | https://github.com/AimWhy/happy-opfs |
-| v86 lib/9p.js | 9P2000.L protocol implementation | https://github.com/nicksherron/nicksherron.com/blob/main/public/v86/lib/9p.js |
-| tokio-fs-ext | Rust WASM OPFS (for L1) | https://github.com/nicksherron/nicksherron.com/tree/main/public/tokio-fs-ext |
+| @zenfs/core | Overlay filesystem, Node.js fs API | https://github.com/zen-fs/core |
+| @zenfs/opfs | OPFS backend for ZenFS | https://github.com/zen-fs/opfs |
+| v86 lib/9p.js | 9P2000.L protocol implementation | https://github.com/copy/v86/blob/master/lib/9p.js |
+| fflate | Fast compression (8KB) | https://github.com/101arrowz/fflate |
+
+### Legacy Dependencies (No Longer Recommended)
+| Package | Purpose | Status |
+|---------|---------|--------|
+| happy-opfs | Sync OPFS via SharedArrayBuffer | **Replaced by ZenFS** |
+| tokio-fs-ext | Rust WASM OPFS (for L1) | **Deferred** |
 
 ---
 
@@ -30,52 +50,62 @@ This document provides detailed implementation guidance for adding Origin Privat
 ### Goal
 Replace the in-memory filesystem in `browser_wasi_shim` with OPFS, allowing WASI programs to persist files across sessions.
 
+### Revised Approach: ZenFS
+
+Instead of custom happy-opfs integration, use **ZenFS** with its OPFS backend:
+
+```javascript
+// worker.js - ZenFS-based OPFS integration (~30 LOC)
+import { configure, fs } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
+
+// Initialize ZenFS with OPFS backend
+async function initOPFS() {
+    const opfsRoot = await navigator.storage.getDirectory();
+
+    await configure({
+        mounts: {
+            '/': {
+                backend: OPFS,
+                handle: opfsRoot
+            }
+        }
+    });
+
+    // Ensure root directories exist
+    await fs.promises.mkdir('/container', { recursive: true });
+    await fs.promises.mkdir('/shared', { recursive: true });
+
+    console.log('[S1] OPFS initialized with ZenFS');
+}
+
+// ZenFS provides Node.js-compatible fs API
+// Use fs.readFileSync, fs.writeFileSync, etc. directly
+```
+
 ### Files to Modify
 
 #### 1. `examples/wasi-browser/htdocs/worker.js`
 
 **Current State**: Uses `browser_wasi_shim` with `PreopenDirectory` backed by in-memory `Directory` class.
 
+**Revised Implementation**:
+
 ```javascript
-// Current implementation (lines ~50-70)
+import { configure, fs } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
 import { File, Directory, PreopenDirectory, WASI } from "@aspect-build/aspect-runtime-js/snapshot";
 
-let fds = [
-    // ...
-    new PreopenDirectory("/", new Directory({})),
-];
-```
+// Initialize ZenFS with OPFS
+const opfsRoot = await navigator.storage.getDirectory();
+await configure({
+    mounts: {
+        '/': { backend: OPFS, handle: opfsRoot }
+    }
+});
 
-**Required Changes**:
-
-```javascript
-// New implementation with OPFS backend
-import {
-    connectSyncAgent,
-    mkdirSync,
-    readFileSync,
-    writeFileSync,
-    removeSync,
-    statSync,
-    readDirSync
-} from 'happy-opfs';
-
-// Initialize OPFS sync agent (must be done before WASI instantiation)
-let opfsReady = false;
-
-async function initOPFS() {
-    // Create worker for sync OPFS operations
-    const workerUrl = new URL('./opfs-worker.js', import.meta.url);
-    await connectSyncAgent(workerUrl);
-    opfsReady = true;
-
-    // Ensure root directories exist
-    mkdirSync('/container');
-    mkdirSync('/shared');
-}
-
-// OPFS-backed Directory implementation
-class OPFSDirectory {
+// ZenFS-backed Directory implementation (much simpler than custom)
+class ZenFSDirectory {
     constructor(basePath) {
         this.basePath = basePath;
     }
@@ -86,45 +116,39 @@ class OPFSDirectory {
 
     get_entry(name) {
         const path = this.resolvePath(name);
-        const statResult = statSync(path);
-
-        if (statResult.isErr()) {
+        try {
+            const stat = fs.statSync(path);
+            return stat.isDirectory()
+                ? new ZenFSDirectory(path)
+                : new ZenFSFile(path);
+        } catch {
             return null;
-        }
-
-        const handle = statResult.unwrap();
-        if (handle.kind === 'directory') {
-            return new OPFSDirectory(path);
-        } else {
-            return new OPFSFile(path);
         }
     }
 
     create_entry_for_path(name, isDir) {
         const path = this.resolvePath(name);
         if (isDir) {
-            mkdirSync(path);
-            return new OPFSDirectory(path);
+            fs.mkdirSync(path, { recursive: true });
+            return new ZenFSDirectory(path);
         } else {
-            writeFileSync(path, new Uint8Array(0));
-            return new OPFSFile(path);
+            fs.writeFileSync(path, new Uint8Array(0));
+            return new ZenFSFile(path);
         }
     }
 
     *entries() {
-        const result = readDirSync(this.basePath);
-        if (result.isOk()) {
-            for (const entry of result.unwrap()) {
-                yield [entry.path, entry.handle.kind === 'directory'
-                    ? new OPFSDirectory(this.resolvePath(entry.path))
-                    : new OPFSFile(this.resolvePath(entry.path))
-                ];
-            }
+        const entries = fs.readdirSync(this.basePath, { withFileTypes: true });
+        for (const entry of entries) {
+            const path = this.resolvePath(entry.name);
+            yield [entry.name, entry.isDirectory()
+                ? new ZenFSDirectory(path)
+                : new ZenFSFile(path)];
         }
     }
 }
 
-class OPFSFile {
+class ZenFSFile {
     constructor(path) {
         this.path = path;
         this._data = null;
@@ -133,8 +157,11 @@ class OPFSFile {
 
     get data() {
         if (this._data === null) {
-            const result = readFileSync(this.path);
-            this._data = result.isOk() ? new Uint8Array(result.unwrap()) : new Uint8Array(0);
+            try {
+                this._data = fs.readFileSync(this.path);
+            } catch {
+                this._data = new Uint8Array(0);
+            }
         }
         return this._data;
     }
@@ -146,77 +173,57 @@ class OPFSFile {
 
     flush() {
         if (this._dirty) {
-            writeFileSync(this.path, this._data);
+            fs.writeFileSync(this.path, this._data);
             this._dirty = false;
         }
     }
 }
 ```
 
-#### 2. New File: `examples/wasi-browser/htdocs/opfs-worker.js`
+#### 2. `examples/wasi-browser/htdocs/index.html`
 
-This worker handles synchronous OPFS operations using happy-opfs's sync agent:
-
-```javascript
-// opfs-worker.js - OPFS sync agent worker
-import { startSyncAgent } from 'happy-opfs';
-
-// Start the sync agent to handle requests from main thread
-startSyncAgent();
-```
-
-#### 3. `examples/wasi-browser/htdocs/index.html`
-
-Add happy-opfs to dependencies and initialize before WASM:
+Add ZenFS dependencies:
 
 ```html
 <!-- Add to head -->
 <script type="importmap">
 {
     "imports": {
-        "happy-opfs": "https://esm.sh/happy-opfs@latest"
+        "@zenfs/core": "https://esm.sh/@zenfs/core",
+        "@zenfs/opfs": "https://esm.sh/@zenfs/opfs"
     }
 }
 </script>
-
-<script type="module">
-// Initialize OPFS before starting container
-await initOPFS();
-// Then start container...
-</script>
 ```
+
+### Legacy Approach: happy-opfs (Not Recommended)
+
+<details>
+<summary>Click to expand legacy happy-opfs implementation</summary>
+
+The original approach used happy-opfs with custom OPFSDirectory/OPFSFile classes (~200 LOC).
+This is preserved here for reference but **ZenFS is now the recommended approach**.
+
+```javascript
+// Legacy: happy-opfs integration
+import {
+    connectSyncAgent,
+    mkdirSync,
+    readFileSync,
+    writeFileSync,
+    removeSync,
+    statSync,
+    readDirSync
+} from 'happy-opfs';
+
+// ... (see git history for full implementation)
+```
+
+</details>
 
 ### Integration with Existing SharedArrayBuffer Pattern
 
-The existing `worker-util.js` uses SharedArrayBuffer for TTY synchronization:
-
-```javascript
-// Current pattern in worker-util.js (lines 28-40)
-var streamCtrl = new Int32Array(new SharedArrayBuffer(4));
-var streamData = new Uint8Array(new SharedArrayBuffer(4096));
-
-function sockAccept(){
-    streamCtrl[0] = 0;
-    postMessage({type: "accept"});
-    Atomics.wait(streamCtrl, 0, 0);  // Blocks until main thread signals
-    return streamData[0] == 1;
-}
-```
-
-happy-opfs uses the same pattern in `SyncMessenger`:
-
-```typescript
-// From happy-opfs/src/worker/shared.ts
-export class SyncMessenger {
-    readonly i32a: Int32Array;  // Lock array
-    readonly maxDataLength: number;
-    private readonly u8a: Uint8Array;  // Data buffer
-
-    // Buffer layout: [MAIN_LOCK, WORKER_LOCK, DATA_LENGTH, RESERVED, ...PAYLOAD]
-}
-```
-
-**Compatibility**: Both patterns can coexist since they use separate SharedArrayBuffer instances.
+The existing `worker-util.js` uses SharedArrayBuffer for TTY synchronization. ZenFS is compatible with this pattern since it uses native OPFS APIs (FileSystemSyncAccessHandle) rather than SharedArrayBuffer for sync operations.
 
 ---
 
@@ -225,29 +232,63 @@ export class SyncMessenger {
 ### Goal
 Implement a 9P2000.L server in JavaScript that serves files from OPFS, allowing the guest Linux VM to mount OPFS as a filesystem.
 
-### Architecture
+### Revised Architecture (with ZenFS OverlayFS)
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     Browser Main Thread                      │
+│                     Browser Worker Thread                    │
 ├─────────────────────────────────────────────────────────────┤
 │  ┌─────────────┐     ┌──────────────┐     ┌──────────────┐  │
-│  │   Guest VM  │────▶│  Virtio-9P   │────▶│  9P Server   │  │
-│  │   (Linux)   │◀────│  Transport   │◀────│  (JS)        │  │
+│  │   Guest VM  │────▶│  Virtio-9P   │────▶│  v86 9p.js   │  │
+│  │   (Linux)   │◀────│  Transport   │◀────│  (drop-in)   │  │
 │  └─────────────┘     └──────────────┘     └──────────────┘  │
 │                                                  │          │
 │                                           ┌──────▼──────┐   │
-│                                           │ happy-opfs  │   │
-│                                           │   (sync)    │   │
+│                                           │ ZenFS       │   │
+│                                           │ OverlayFS   │   │
 │                                           └──────┬──────┘   │
 │                                                  │          │
-├──────────────────────────────────────────────────┼──────────┤
-│                     OPFS Worker                  │          │
-│                                           ┌──────▼──────┐   │
-│                                           │    OPFS     │   │
-│                                           │  Storage    │   │
-│                                           └─────────────┘   │
+│                              ┌───────────────────┼──────────┤
+│                              │                   │          │
+│                       ┌──────▼──────┐     ┌──────▼──────┐   │
+│                       │  Readable   │     │  Writable   │   │
+│                       │  (eStargz)  │     │   (OPFS)    │   │
+│                       └─────────────┘     └─────────────┘   │
 └─────────────────────────────────────────────────────────────┘
+```
+
+### Key Insight: ZenFS Provides OverlayFS
+
+Instead of custom COW layer implementation, use **ZenFS OverlayFS**:
+
+```javascript
+// Unified filesystem configuration (~50 LOC total)
+import { configure, fs, OverlayFS, InMemory } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
+
+const opfsHandle = await navigator.storage.getDirectory();
+
+await configure({
+    mounts: {
+        // Guest VM overlay: immutable base + mutable workspace
+        '/guest': {
+            backend: OverlayFS,
+            readable: eStargzBaseLayer,   // Read-only base image
+            writable: {
+                backend: OPFS,
+                handle: await opfsHandle.getDirectoryHandle('workspace', { create: true })
+            }
+        },
+
+        // Emulator's own storage
+        '/emulator': {
+            backend: OPFS,
+            handle: await opfsHandle.getDirectoryHandle('emulator', { create: true })
+        }
+    }
+});
+
+console.log('[M1] ZenFS OverlayFS configured');
 ```
 
 ### Drop-In: v86's lib/9p.js
@@ -268,127 +309,142 @@ cp /tmp/v86/lib/marshall.js examples/wasi-browser/htdocs/
 cp /tmp/v86/lib/filesystem.js examples/wasi-browser/htdocs/
 ```
 
-#### Step 2: Create OPFS Filesystem Backend
+#### Step 2: Create ZenFS Backend Adapter
 
-v86's 9p.js uses a `FS` object for filesystem operations. Create an OPFS-backed implementation:
+v86's 9p.js expects a filesystem interface. ZenFS provides Node.js-compatible fs API:
 
 ```javascript
-// opfs-fs-backend.js - OPFS backend for v86's 9p.js
-import {
-    connectSyncAgent,
-    mkdirSync,
-    readFileSync,
-    writeFileSync,
-    removeSync,
-    statSync,
-    readDirSync,
-    existsSync,
-    renameSync
-} from 'happy-opfs';
+// zenfs-9p-backend.js - ZenFS backend for v86's 9p.js (~50 LOC)
+import { fs } from '@zenfs/core';
 
 /**
- * OPFS Filesystem Backend for v86's 9p.js
+ * ZenFS Filesystem Backend for v86's 9p.js
  *
- * v86's 9p.js expects a FS object with these methods.
- * This adapter translates them to happy-opfs sync operations.
+ * Much simpler than custom implementation since ZenFS provides
+ * full Node.js fs API compatibility.
  */
-export class OPFSFilesystem {
-    constructor(rootPath = '/p9root') {
-        this.rootPath = rootPath;
-        mkdirSync(rootPath);
+export class ZenFS9PBackend {
+    constructor(basePath = '/guest') {
+        this.basePath = basePath;
     }
 
-    // v86 FS interface methods - adapt to happy-opfs
+    _path(path) {
+        return this.basePath + path;
+    }
 
     read(path, offset, length) {
-        const fullPath = this.rootPath + path;
-        const result = readFileSync(fullPath);
-        if (result.isErr()) return null;
-        const data = new Uint8Array(result.unwrap());
-        return data.subarray(offset, offset + length);
+        try {
+            const buffer = Buffer.alloc(length);
+            const fd = fs.openSync(this._path(path), 'r');
+            fs.readSync(fd, buffer, 0, length, offset);
+            fs.closeSync(fd);
+            return buffer;
+        } catch {
+            return null;
+        }
     }
 
     write(path, offset, data) {
-        const fullPath = this.rootPath + path;
-        // Read existing, expand if needed, write back
-        let existing = new Uint8Array(0);
-        const readResult = readFileSync(fullPath);
-        if (readResult.isOk()) {
-            existing = new Uint8Array(readResult.unwrap());
+        try {
+            const fd = fs.openSync(this._path(path), 'r+');
+            fs.writeSync(fd, data, 0, data.length, offset);
+            fs.closeSync(fd);
+            return data.length;
+        } catch {
+            return 0;
         }
-        const newSize = Math.max(existing.length, offset + data.length);
-        const newData = new Uint8Array(newSize);
-        newData.set(existing);
-        newData.set(data, offset);
-        writeFileSync(fullPath, newData);
-        return data.length;
     }
 
     stat(path) {
-        const fullPath = this.rootPath + path;
-        const result = statSync(fullPath);
-        if (result.isErr()) return null;
-        const handle = result.unwrap();
-        return {
-            is_directory: handle.kind === 'directory',
-            size: handle.size || 0,
-            mtime: handle.lastModified || Date.now()
-        };
+        try {
+            const stat = fs.statSync(this._path(path));
+            return {
+                is_directory: stat.isDirectory(),
+                size: stat.size,
+                mtime: stat.mtimeMs
+            };
+        } catch {
+            return null;
+        }
     }
 
     readdir(path) {
-        const fullPath = this.rootPath + path;
-        const result = readDirSync(fullPath);
-        if (result.isErr()) return [];
-        return Array.from(result.unwrap()).map(entry => ({
-            name: entry.path.split('/').pop(),
-            is_directory: entry.handle.kind === 'directory'
-        }));
+        try {
+            return fs.readdirSync(this._path(path), { withFileTypes: true })
+                .map(entry => ({
+                    name: entry.name,
+                    is_directory: entry.isDirectory()
+                }));
+        } catch {
+            return [];
+        }
     }
 
     mkdir(path) {
-        const fullPath = this.rootPath + path;
-        return mkdirSync(fullPath).isOk();
+        try {
+            fs.mkdirSync(this._path(path), { recursive: true });
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     unlink(path) {
-        const fullPath = this.rootPath + path;
-        return removeSync(fullPath).isOk();
+        try {
+            fs.unlinkSync(this._path(path));
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     rename(oldPath, newPath) {
-        const fullOld = this.rootPath + oldPath;
-        const fullNew = this.rootPath + newPath;
-        return renameSync(fullOld, fullNew).isOk();
+        try {
+            fs.renameSync(this._path(oldPath), this._path(newPath));
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     exists(path) {
-        const fullPath = this.rootPath + path;
-        const result = existsSync(fullPath);
-        return result.isOk() && result.unwrap();
+        try {
+            fs.accessSync(this._path(path));
+            return true;
+        } catch {
+            return false;
+        }
     }
 }
 ```
 
-#### Step 3: Integrate v86's 9p.js with OPFS Backend
+#### Step 3: Integrate v86's 9p.js with ZenFS
 
 ```javascript
-// worker.js - Wire up v86's 9p.js with OPFS backend
+// worker.js - Wire up v86's 9p.js with ZenFS backend
 import { Virtio9p } from './9p.js';
-import { OPFSFilesystem } from './opfs-fs-backend.js';
-import { connectSyncAgent } from 'happy-opfs';
+import { ZenFS9PBackend } from './zenfs-9p-backend.js';
+import { configure, fs, OverlayFS } from '@zenfs/core';
+import { OPFS } from '@zenfs/opfs';
 
-// Initialize OPFS sync agent
-const opfsWorkerUrl = new URL('./opfs-worker.js', import.meta.url);
-await connectSyncAgent(opfsWorkerUrl);
+// Initialize ZenFS with OverlayFS
+await configure({
+    mounts: {
+        '/guest': {
+            backend: OverlayFS,
+            readable: eStargzBaseLayer,
+            writable: { backend: OPFS }
+        }
+    }
+});
 
-// Create OPFS-backed filesystem
-const opfsFs = new OPFSFilesystem('/shared');
+// Create ZenFS-backed filesystem for 9P
+const zenFs = new ZenFS9PBackend('/guest');
 
-// Create v86 9P server with OPFS backend
-const virtio9p = new Virtio9p(opfsFs, /* bus */ emulator.bus);
+// Create v86 9P server with ZenFS backend
+const virtio9p = new Virtio9p(zenFs, emulator.bus);
 
-// The 9P server is now ready - v86's lib/9p.js handles all protocol details
+console.log('[M1] 9P server ready with ZenFS OverlayFS');
 ```
 
 #### Step 4: What v86's lib/9p.js Provides (No Need to Reimplement)
@@ -412,6 +468,28 @@ v86's `lib/9p.js` already implements:
 | ... | ~20 more operations | ✓ Implemented |
 
 **You don't need to write any 9P protocol code** - just provide the filesystem backend.
+
+### Legacy Approach: happy-opfs (Not Recommended)
+
+<details>
+<summary>Click to expand legacy OPFSFilesystem implementation</summary>
+
+The original approach used happy-opfs with custom OPFSFilesystem class (~80 LOC).
+This is preserved here for reference but **ZenFS is now the recommended approach**.
+
+```javascript
+// Legacy: happy-opfs OPFSFilesystem adapter
+import { readFileSync, writeFileSync, statSync } from 'happy-opfs';
+
+export class OPFSFilesystem {
+    constructor(rootPath = '/p9root') {
+        this.rootPath = rootPath;
+    }
+    // ... (see git history for full implementation)
+}
+```
+
+</details>
 
 ### Alternative: Minimal Custom Backend
 
@@ -502,7 +580,36 @@ if err := mountOPFS(); err != nil {
 
 ---
 
-## Phase L1: Native OPFS Virtio Device (Future)
+## Phase L1: Native OPFS Virtio Device (DEFERRED)
+
+> **⚠️ STATUS: DEFERRED**
+>
+> Based on the drop-in component analysis, L1 is now **deferred** until M1 + ZenFS is proven insufficient for performance requirements. The rationale:
+>
+> 1. **ZenFS uses native OPFS APIs** - similar performance characteristics to Rust
+> 2. **M1 with ZenFS OverlayFS** may be fast enough for dev workloads
+> 3. **Rust WASM adds build complexity** (wasm-pack, separate build pipeline)
+> 4. **~1,500 LOC saved** by deferring this phase
+>
+> **Decision criteria for implementing L1:**
+> - If M1 I/O latency > 100ms on typical operations
+> - If heavy I/O workloads (large builds, git operations) are too slow
+> - If users report performance issues with M1
+
+### When to Reconsider L1
+
+```
+Decision tree:
+1. Implement M1 with ZenFS OverlayFS
+2. Benchmark: file reads/writes, npm install, git operations
+3. If <100ms latency on typical ops → Keep M1, skip L1 ✓
+4. If >100ms latency → Implement L1 for hot paths only
+```
+
+### Archived: Original L1 Design
+
+<details>
+<summary>Click to expand original L1 design (for future reference)</summary>
 
 ### Goal
 Implement OPFS access directly in Rust WASM using `tokio-fs-ext` for truly synchronous I/O without SharedArrayBuffer overhead.
@@ -573,6 +680,8 @@ For L1, you would modify:
 | Code complexity | Moderate | Higher initial, lower runtime |
 | Performance | Good | Excellent |
 | Browser support | All modern | Requires SharedArrayBuffer headers |
+
+</details>
 
 ---
 
@@ -649,22 +758,45 @@ async function testOPFSIntegration() {
 
 ## Deployment Checklist
 
-### S1 (OPFS-backed WASI)
+### Revised Checklist (with ZenFS Drop-ins)
 
-- [ ] Install happy-opfs: `npm install happy-opfs`
-- [ ] Create `opfs-worker.js` with sync agent
-- [ ] Modify `worker.js` to use OPFSDirectory/OPFSFile
+#### S1 (OPFS-backed WASI)
+
+- [ ] Install ZenFS: `npm install @zenfs/core @zenfs/opfs`
+- [ ] Initialize ZenFS with OPFS backend in `worker.js`
+- [ ] Create `ZenFSDirectory` and `ZenFSFile` wrapper classes
 - [ ] Update import map in `index.html`
-- [ ] Add SharedArrayBuffer headers (already required for xterm-pty)
 - [ ] Test file persistence across page reloads
 
-### M1 (9P Server)
+#### M1 (9P Server with OverlayFS)
 
-- [ ] Create `p9-opfs.js` with OPFS9PServer
-- [ ] Integrate with existing virtio-9p transport
-- [ ] Modify guest init to mount OPFS
-- [ ] Add 'opfs' virtio device tag
+- [ ] Install ZenFS (if not already): `npm install @zenfs/core @zenfs/opfs`
+- [ ] Copy v86's `lib/9p.js`, `lib/marshall.js`, `lib/filesystem.js`
+- [ ] Create `zenfs-9p-backend.js` adapter (~50 LOC)
+- [ ] Configure ZenFS OverlayFS mount
+- [ ] Modify guest init to mount 9P filesystem
 - [ ] Test mounting from guest: `mount -t 9p opfs /mnt/opfs -o trans=virtio`
+
+#### L1 (DEFERRED)
+
+- [ ] ~~Rust 9P server~~ - Evaluate after M1 benchmarks
+- [ ] ~~tokio-fs-ext integration~~ - Only if M1 < 100ms latency requirement
+
+### Quick Start
+
+```bash
+# 1. Install dependencies
+npm install @zenfs/core @zenfs/opfs fflate
+
+# 2. Copy v86 9P files
+git clone --depth 1 https://github.com/copy/v86.git /tmp/v86
+cp /tmp/v86/lib/9p.js examples/wasi-browser/htdocs/
+cp /tmp/v86/lib/marshall.js examples/wasi-browser/htdocs/
+
+# 3. Create zenfs-9p-backend.js (see M1 section above)
+
+# 4. Update worker.js with ZenFS initialization
+```
 
 ### Required HTTP Headers
 
@@ -674,6 +806,23 @@ Cross-Origin-Opener-Policy: same-origin
 ```
 
 These are already required for SharedArrayBuffer (used by xterm-pty), so no additional configuration needed.
+
+### Legacy Checklist (Not Recommended)
+
+<details>
+<summary>Original checklist with happy-opfs</summary>
+
+#### S1 (Legacy)
+- [ ] Install happy-opfs: `npm install happy-opfs`
+- [ ] Create `opfs-worker.js` with sync agent
+- [ ] Modify `worker.js` to use OPFSDirectory/OPFSFile
+- [ ] Update import map in `index.html`
+
+#### M1 (Legacy)
+- [ ] Create custom `OPFSFilesystem` adapter
+- [ ] Implement COW layer manually
+
+</details>
 
 ---
 
@@ -714,9 +863,22 @@ if (this.debug) {
 
 ## References
 
+### Core
 1. [9P2000.L Protocol Specification](https://github.com/chaos/diod/blob/master/protocol.md)
 2. [v86 9P Implementation](https://github.com/copy/v86/blob/master/lib/9p.js)
-3. [happy-opfs Documentation](https://jiangjie.github.io/happy-opfs/)
-4. [tokio-fs-ext WASM OPFS](https://crates.io/crates/tokio-fs-ext)
-5. [OPFS Browser Support](https://caniuse.com/native-filesystem-api)
-6. [container2wasm Architecture](https://github.com/ktock/container2wasm)
+3. [OPFS Browser Support](https://caniuse.com/native-filesystem-api)
+4. [container2wasm Architecture](https://github.com/ktock/container2wasm)
+
+### Drop-in Libraries (Recommended)
+5. [ZenFS Core](https://github.com/zen-fs/core) - OverlayFS, Node.js fs API
+6. [ZenFS OPFS Backend](https://github.com/zen-fs/opfs) - OPFS backend for ZenFS
+7. [fflate Compression](https://github.com/101arrowz/fflate) - Fast gzip (8KB)
+8. [modern-tar](https://github.com/nicolo-ribaudo/nicolo-ribaudo.com/tree/main/packages/modern-tar) - Zero-dep streaming tar
+
+### Legacy (For Reference)
+9. [happy-opfs Documentation](https://jiangjie.github.io/happy-opfs/) - Replaced by ZenFS
+10. [tokio-fs-ext WASM OPFS](https://crates.io/crates/tokio-fs-ext) - Deferred (L1)
+
+### Related Projects
+11. [XL-Lite Design Document](./XL_LITE_DESIGN.md) - Reduced-scope snapshot architecture
+12. [OPFS Integration Overview](./OPFS_INTEGRATION.md) - High-level integration guide
