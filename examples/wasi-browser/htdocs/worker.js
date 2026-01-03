@@ -1,14 +1,15 @@
 import { initOPFS, getS1Filesystem, getM1Filesystem } from './opfs-fs-backend.js';
 import { PreopenDirectory, OpenFile, File } from './browser_wasi_shim/index.js';
 import './browser_wasi_shim/wasi_defs.js';
-import { 
-    registerSocketBuffer, serveIfInitMsg, getImagename, errStatus, 
-    sockAccept, sockSend, sockRecv, sockWaitForReadable, 
-    sendCert, recvCert, getCertDir, wasiHackSocket 
+import {
+    registerSocketBuffer, serveIfInitMsg, getImagename, errStatus,
+    sockAccept, sockSend, sockRecv, sockWaitForReadable,
+    sendCert, recvCert, getCertDir, wasiHackSocket
 } from './worker-util.js';
-import { 
-    SnapshotManager, takeSnapshotV1, restoreSnapshotV1, initSnapshotDir, setWasiInstance 
+import {
+    SnapshotManager, takeSnapshotV1, restoreSnapshotV1, initSnapshotDir, setWasiInstance
 } from './snapshot-manager.js';
+import { P9Protocol } from './p9-protocol.js';
 import "https://cdn.jsdelivr.net/npm/xterm-pty@0.9.4/workerTools.js";
 
 // ============================================================
@@ -38,23 +39,22 @@ async function initializeOPFS() {
         }
     } else {
         try {
-            // v86 9p.js expects a full VirtIO wiring (cpu/bus). For message-based
-            // handling we expose a tiny adapter that only supports handle_message.
-            const { Virtio9p } = await import('./9p.js');
+            // M1: Pure JavaScript 9P2000.L protocol server backed by OPFS
+            // Uses p9-protocol.js which implements the full 9P2000.L protocol
+            // without requiring v86's virtio infrastructure
+            const p9server = new P9Protocol(m1);
             opfs9pServer = {
                 handle_message: (msg) => {
                     try {
-                        // Virtio9p requires a CPU/bus that is not present in this worker,
-                        // so until a full emulator bus is wired we return null instead of throwing.
-                        console.warn('[OPFS] M1 backend is not fully wired to a CPU/bus; returning no-op response');
-                        return null;
+                        const msgArray = msg instanceof Uint8Array ? msg : new Uint8Array(msg);
+                        return p9server.handleMessage(msgArray);
                     } catch (err) {
-                        console.warn('[OPFS] M1 backend failed to handle 9P message:', err);
+                        console.error('[OPFS] M1 9P protocol error:', err);
                         return null;
                     }
                 }
             };
-            console.log('[OPFS] M1 JavaScript 9P server placeholder initialized (no-op without bus)');
+            console.log('[OPFS] M1 JavaScript 9P2000.L server initialized with p9-protocol.js');
         } catch (err) {
             console.warn('[OPFS] M1 backend unavailable, disabling M1:', err);
             opfs9pServer = null;
