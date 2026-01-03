@@ -785,3 +785,864 @@ Basic caching         ────────>  + Full offline
 ```
 
 The CAS and manifest format are compatible, so snapshots created with XL-Lite work with Full XL.
+
+---
+
+## Deep Dive: Overlay Filesystem Architecture
+
+The key insight for Codex is separating **immutable base** (runtimes, tools) from **mutable workspace** (user code, deps). This enables:
+
+1. **Shared base across sessions** - Download once, reuse forever
+2. **Fast workspace sync** - Only user changes need persistence
+3. **Instant rollback** - Discard workspace changes, keep base
+4. **Efficient snapshots** - Base chunks never change, always deduplicated
+
+### OverlayFS-like Design in Browser
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Guest Linux Filesystem View                          │
+│                                                                              │
+│   /                                                                          │
+│   ├── bin/         ─┐                                                        │
+│   ├── lib/          │                                                        │
+│   ├── usr/          ├── Immutable Base Layer (read-only)                    │
+│   ├── etc/          │   From: eStargz CDN → cached in OPFS                  │
+│   ├── opt/         ─┘                                                        │
+│   │                                                                          │
+│   └── workspace/   ─── Mutable Overlay (read-write)                         │
+│       ├── .git/        From: OPFS via 9P mount                              │
+│       ├── src/                                                               │
+│       └── node_modules/                                                      │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Physical Storage Layout                              │
+│                                                                              │
+│   CDN (eStargz)                    OPFS (Browser)                           │
+│   ─────────────                    ──────────────                           │
+│                                                                              │
+│   ┌─────────────────┐              ┌─────────────────────────────────────┐  │
+│   │ codex-base.esgz │   ────────>  │ /base-cache/                        │  │
+│   │                 │   (lazy)     │   ├── layers/                       │  │
+│   │ • Layer 0-6    │              │   │   ├── 0-alpine.tar              │  │
+│   │ • 400MB total  │              │   │   ├── 1-buildtools.tar          │  │
+│   │ • TOC at end   │              │   │   └── ...                        │  │
+│   │                 │              │   └── manifest.json                 │  │
+│   └─────────────────┘              └─────────────────────────────────────┘  │
+│                                                                              │
+│                                    ┌─────────────────────────────────────┐  │
+│                                    │ /workspace/                         │  │
+│                                    │   ├── project-a/                    │  │
+│                                    │   │   ├── src/                      │  │
+│                                    │   │   └── package.json              │  │
+│                                    │   └── project-b/                    │  │
+│                                    │       └── main.py                   │  │
+│                                    └─────────────────────────────────────┘  │
+│                                                                              │
+│                                    ┌─────────────────────────────────────┐  │
+│                                    │ /snapshots/                         │  │
+│                                    │   ├── cas/                          │  │
+│                                    │   ├── manifests/                    │  │
+│                                    │   └── profiles/                     │  │
+│                                    └─────────────────────────────────────┘  │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Two 9P Mounts Strategy
+
+```javascript
+/**
+ * Dual 9P Mount Configuration
+ *
+ * The guest sees a unified filesystem, but underneath:
+ * - /base is read-only from eStargz cache
+ * - /workspace is read-write to OPFS
+ */
+
+// In guest init (Go)
+const MOUNTS = `
+# Read-only base (eStargz cached layers)
+mount -t 9p base /mnt/base -o ro,trans=virtio,version=9p2000.L
+
+# Read-write workspace (OPFS persistence)
+mount -t 9p workspace /mnt/workspace -o rw,trans=virtio,version=9p2000.L
+
+# Bind mounts to create unified view
+mount --bind /mnt/base/bin /bin
+mount --bind /mnt/base/lib /lib
+mount --bind /mnt/base/usr /usr
+mount --bind /mnt/workspace /workspace
+`;
+
+// In JavaScript worker
+class DualMount9PServer {
+    constructor(baseFS, workspaceFS) {
+        this.base = baseFS;      // Read-only, from eStargz cache
+        this.workspace = workspaceFS;  // Read-write, to OPFS
+    }
+
+    handle9PMessage(tag, message) {
+        // Route based on mount tag
+        if (tag === 'base') {
+            return this.base.handle(message);
+        } else if (tag === 'workspace') {
+            return this.workspace.handle(message);
+        }
+    }
+}
+```
+
+### Copy-on-Write for System Files
+
+When Codex needs to modify a system file (e.g., `/etc/hosts`):
+
+```javascript
+/**
+ * COW Layer Manager
+ *
+ * Handles writes to "read-only" base files by copying to overlay.
+ */
+class COWLayerManager {
+    constructor(baseFS, overlayFS) {
+        this.base = baseFS;
+        this.overlay = overlayFS;
+        this.cowPaths = new Set();  // Paths that have been copied
+    }
+
+    read(path) {
+        // Check overlay first (COW'd files)
+        if (this.cowPaths.has(path)) {
+            return this.overlay.readFile(path);
+        }
+        // Fall back to base
+        return this.base.readFile(path);
+    }
+
+    write(path, data) {
+        // If writing to base path, copy-on-write
+        if (this.base.exists(path) && !this.cowPaths.has(path)) {
+            // File exists in base, needs COW
+            this.cowPaths.add(path);
+        }
+        // Always write to overlay
+        return this.overlay.writeFile(path, data);
+    }
+
+    delete(path) {
+        // Mark as deleted in overlay (whiteout)
+        this.overlay.writeFile(path + '.whiteout', new Uint8Array(0));
+        this.cowPaths.add(path);
+    }
+
+    listdir(path) {
+        const baseEntries = this.base.readdir(path) || [];
+        const overlayEntries = this.overlay.readdir(path) || [];
+
+        // Merge, with overlay taking precedence
+        const merged = new Map();
+        for (const entry of baseEntries) {
+            if (!this.overlay.exists(entry.path + '.whiteout')) {
+                merged.set(entry.name, entry);
+            }
+        }
+        for (const entry of overlayEntries) {
+            if (!entry.name.endsWith('.whiteout')) {
+                merged.set(entry.name, entry);
+            }
+        }
+
+        return Array.from(merged.values());
+    }
+}
+```
+
+---
+
+## Deep Dive: eStargz Integration
+
+### Pre-built Codex Base Image
+
+```dockerfile
+# Dockerfile.codex-base
+FROM debian:bookworm-slim
+
+# Layer 0: Base system (already in debian:bookworm-slim)
+
+# Layer 1: Build essentials
+RUN apt-get update && apt-get install -y \
+    build-essential cmake ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer 2: Python
+RUN apt-get update && apt-get install -y \
+    python3.11 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer 3: Node.js
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+# Layer 4: Rust
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Layer 5: Go
+RUN curl -LO https://go.dev/dl/go1.22.0.linux-amd64.tar.gz \
+    && tar -C /usr/local -xzf go1.22.0.linux-amd64.tar.gz \
+    && rm go1.22.0.linux-amd64.tar.gz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Layer 6: Dev utilities
+RUN apt-get update && apt-get install -y \
+    git vim curl wget jq ripgrep fd-find \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create workspace
+RUN mkdir -p /workspace
+WORKDIR /workspace
+```
+
+### Convert to eStargz
+
+```bash
+# Build and convert to eStargz format
+docker build -t codex-base -f Dockerfile.codex-base .
+
+# Convert with prioritization file (hot files first)
+ctr-remote images optimize \
+    --oci \
+    --period=10 \
+    codex-base \
+    registry.example.com/codex-base:estargz
+
+# The prioritization traces which files are accessed first during boot
+# These go at the beginning of the archive for faster lazy load
+```
+
+### Lazy Layer Fetching
+
+```javascript
+/**
+ * eStargz Layer Manager
+ *
+ * Lazy-loads container image layers from CDN.
+ * Only fetches what's actually accessed.
+ */
+class EStargzLayerManager {
+    constructor(baseUrl, cacheFS) {
+        this.baseUrl = baseUrl;
+        this.cache = cacheFS;
+        this.toc = null;
+        this.loadedChunks = new Set();
+    }
+
+    async init() {
+        // Fetch TOC (last 51 bytes has offset, then fetch TOC)
+        const footer = await this.fetchRange(-51, 51);
+        const tocOffset = this.parseTocOffset(footer);
+        const tocData = await this.fetchRange(tocOffset, -1);
+        this.toc = JSON.parse(new TextDecoder().decode(tocData));
+
+        console.log(`[eStargz] Loaded TOC: ${this.toc.entries.length} entries`);
+    }
+
+    async fetchRange(start, length) {
+        const headers = {};
+        if (start < 0) {
+            // Negative = from end
+            headers['Range'] = `bytes=${start}`;
+        } else if (length < 0) {
+            // To end
+            headers['Range'] = `bytes=${start}-`;
+        } else {
+            headers['Range'] = `bytes=${start}-${start + length - 1}`;
+        }
+
+        const response = await fetch(this.baseUrl, { headers });
+        return new Uint8Array(await response.arrayBuffer());
+    }
+
+    /**
+     * Get file content by path
+     */
+    async getFile(path) {
+        // Check cache first
+        const cached = this.cache.readFile(`/base-cache/files${path}`);
+        if (cached) return cached;
+
+        // Find in TOC
+        const entry = this.toc.entries.find(e => e.name === path.slice(1));
+        if (!entry) return null;
+
+        // Fetch and decompress chunk
+        const compressed = await this.fetchRange(entry.offset, entry.chunkSize);
+        const data = pako.ungzip(compressed);
+
+        // Cache for next time
+        this.cache.mkdir(`/base-cache/files${path.substring(0, path.lastIndexOf('/'))}`);
+        this.cache.writeFile(`/base-cache/files${path}`, data);
+
+        return data;
+    }
+
+    /**
+     * Prefetch critical files for faster boot
+     */
+    async prefetchCritical() {
+        // Files needed for shell startup
+        const criticalPaths = [
+            '/bin/sh', '/bin/bash',
+            '/lib/x86_64-linux-gnu/libc.so.6',
+            '/lib/x86_64-linux-gnu/ld-linux-x86-64.so.2',
+            '/usr/bin/python3',
+            '/usr/bin/node',
+        ];
+
+        // Batch fetch in parallel
+        await Promise.all(criticalPaths.map(p => this.getFile(p)));
+        console.log('[eStargz] Critical files prefetched');
+    }
+}
+```
+
+---
+
+## Deep Dive: Workspace Sync Strategy
+
+### Real-time Sync vs Batch Sync
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Workspace Sync Strategies                            │
+│                                                                              │
+│   Option A: Real-time Sync                Option B: Batch Sync              │
+│   ─────────────────────                   ────────────────────              │
+│                                                                              │
+│   File write in VM                        File write in VM                  │
+│         │                                       │                            │
+│         ▼                                       ▼                            │
+│   9P Twrite message                       Memory buffer                     │
+│         │                                       │                            │
+│         ▼                                       │ (batch)                    │
+│   OPFS writeFileSync                            ▼                            │
+│         │                                  Periodic flush                    │
+│         ▼                                  (every 5s or on idle)            │
+│   Persistent immediately                        │                            │
+│                                                 ▼                            │
+│   ✓ No data loss                          OPFS batch write                  │
+│   ✗ Slower writes                               │                            │
+│                                                 ▼                            │
+│                                           ✓ Faster writes                   │
+│                                           ✗ Potential data loss             │
+│                                                                              │
+│   Recommendation: Hybrid                                                     │
+│   - Real-time for small files (<1MB)                                         │
+│   - Batch for large writes (builds, npm install)                            │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Hybrid Sync Implementation
+
+```javascript
+/**
+ * Hybrid Workspace Sync
+ *
+ * Balances durability vs performance:
+ * - Small files: sync immediately
+ * - Large files: buffer and batch
+ * - Critical paths: always sync
+ */
+class HybridWorkspaceSync {
+    constructor(fs) {
+        this.fs = fs;
+        this.writeBuffer = new Map();  // path -> { data, timestamp }
+        this.SMALL_FILE_THRESHOLD = 64 * 1024;  // 64KB
+        this.BATCH_INTERVAL = 5000;  // 5 seconds
+        this.CRITICAL_PATHS = ['.git/', 'package.json', 'Cargo.toml', 'pyproject.toml'];
+
+        // Start batch flush timer
+        this.startBatchFlush();
+    }
+
+    write(path, data, offset = 0) {
+        const isSmall = data.length < this.SMALL_FILE_THRESHOLD;
+        const isCritical = this.CRITICAL_PATHS.some(p => path.includes(p));
+
+        if (isSmall || isCritical) {
+            // Sync immediately
+            return this.syncWrite(path, data, offset);
+        } else {
+            // Buffer for batch
+            return this.bufferWrite(path, data, offset);
+        }
+    }
+
+    syncWrite(path, data, offset) {
+        // Clear any buffered data for this path
+        this.writeBuffer.delete(path);
+
+        // Write immediately to OPFS
+        if (offset === 0) {
+            return this.fs.writeFile(path, data);
+        } else {
+            return this.fs.writePartial(path, offset, data);
+        }
+    }
+
+    bufferWrite(path, data, offset) {
+        // Add to buffer
+        let existing = this.writeBuffer.get(path) || { data: new Uint8Array(0), offset: 0 };
+
+        if (offset === 0) {
+            existing = { data, timestamp: Date.now() };
+        } else {
+            // Merge with existing buffer
+            const newSize = Math.max(existing.data.length, offset + data.length);
+            const merged = new Uint8Array(newSize);
+            merged.set(existing.data);
+            merged.set(data, offset);
+            existing = { data: merged, timestamp: Date.now() };
+        }
+
+        this.writeBuffer.set(path, existing);
+        return data.length;  // Return immediately
+    }
+
+    async flush() {
+        if (this.writeBuffer.size === 0) return;
+
+        console.log(`[Sync] Flushing ${this.writeBuffer.size} buffered files`);
+
+        for (const [path, { data }] of this.writeBuffer) {
+            this.fs.writeFile(path, data);
+        }
+
+        this.writeBuffer.clear();
+    }
+
+    startBatchFlush() {
+        setInterval(() => this.flush(), this.BATCH_INTERVAL);
+
+        // Also flush on page visibility change
+        if (typeof document !== 'undefined') {
+            document.addEventListener('visibilitychange', () => {
+                if (document.hidden) {
+                    this.flush();
+                }
+            });
+        }
+
+        // Flush before unload
+        if (typeof window !== 'undefined') {
+            window.addEventListener('beforeunload', () => {
+                this.flush();
+            });
+        }
+    }
+}
+```
+
+---
+
+## Deep Dive: Build Artifact Caching
+
+### Dependency Cache Strategy
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Dependency Caching                                   │
+│                                                                              │
+│   Language        Cache Location           Strategy                          │
+│   ────────        ──────────────           ────────                          │
+│   Node.js         /workspace/.npm-cache    Hash package-lock.json           │
+│   Python          /workspace/.venv         Hash requirements.txt            │
+│   Rust            /workspace/.cargo        Hash Cargo.lock                  │
+│   Go              /workspace/.go-cache     Hash go.sum                      │
+│                                                                              │
+│   ┌─────────────────────────────────────────────────────────────────────┐   │
+│   │                    Cache Deduplication                               │   │
+│   │                                                                      │   │
+│   │   Project A: package-lock.json → hash: abc123                       │   │
+│   │   Project B: package-lock.json → hash: abc123  (same!)              │   │
+│   │                                                                      │   │
+│   │   Cache: /dep-cache/npm/abc123/ ──┬──> Project A: node_modules/     │   │
+│   │                                   └──> Project B: node_modules/     │   │
+│   │                                                                      │   │
+│   │   Storage: Only one copy in OPFS                                     │   │
+│   │   Restore: Symlink or fast copy to workspace                        │   │
+│   │                                                                      │   │
+│   └─────────────────────────────────────────────────────────────────────┘   │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Implementation
+
+```javascript
+/**
+ * Dependency Cache Manager
+ *
+ * Content-addressed caching for package dependencies.
+ * Dramatically speeds up project switching.
+ */
+class DependencyCache {
+    constructor(fs) {
+        this.fs = fs;
+        this.cacheBase = '/dep-cache';
+        this.fs.mkdir(this.cacheBase);
+    }
+
+    /**
+     * Get cache key from lockfile
+     */
+    async getCacheKey(lockfilePath) {
+        const content = this.fs.readFile(lockfilePath);
+        if (!content) return null;
+
+        // Hash first 1MB (lockfiles can be large)
+        const toHash = content.subarray(0, 1024 * 1024);
+        const hashBuffer = await crypto.subtle.digest('SHA-256', toHash);
+        return Array.from(new Uint8Array(hashBuffer).subarray(0, 8))
+            .map(b => b.toString(16).padStart(2, '0'))
+            .join('');
+    }
+
+    /**
+     * Restore cached dependencies
+     */
+    async restore(projectPath, type) {
+        const lockfiles = {
+            'npm': 'package-lock.json',
+            'yarn': 'yarn.lock',
+            'pip': 'requirements.txt',
+            'cargo': 'Cargo.lock',
+            'go': 'go.sum'
+        };
+
+        const lockfile = lockfiles[type];
+        if (!lockfile) return false;
+
+        const lockfilePath = `${projectPath}/${lockfile}`;
+        const cacheKey = await this.getCacheKey(lockfilePath);
+        if (!cacheKey) return false;
+
+        const cachePath = `${this.cacheBase}/${type}/${cacheKey}`;
+        if (!this.fs.exists(cachePath)) {
+            console.log(`[DepCache] No cache for ${type}:${cacheKey}`);
+            return false;
+        }
+
+        // Copy cached deps to project
+        const targetDirs = {
+            'npm': 'node_modules',
+            'yarn': 'node_modules',
+            'pip': '.venv',
+            'cargo': 'target',
+            'go': 'vendor'
+        };
+
+        const targetDir = `${projectPath}/${targetDirs[type]}`;
+        await this.copyDir(cachePath, targetDir);
+
+        console.log(`[DepCache] Restored ${type} deps from cache`);
+        return true;
+    }
+
+    /**
+     * Save dependencies to cache
+     */
+    async save(projectPath, type) {
+        const lockfiles = {
+            'npm': 'package-lock.json',
+            'pip': 'requirements.txt',
+            'cargo': 'Cargo.lock',
+            'go': 'go.sum'
+        };
+
+        const depDirs = {
+            'npm': 'node_modules',
+            'pip': '.venv',
+            'cargo': 'target',
+            'go': 'vendor'
+        };
+
+        const lockfilePath = `${projectPath}/${lockfiles[type]}`;
+        const cacheKey = await this.getCacheKey(lockfilePath);
+        if (!cacheKey) return false;
+
+        const cachePath = `${this.cacheBase}/${type}/${cacheKey}`;
+        const depPath = `${projectPath}/${depDirs[type]}`;
+
+        if (this.fs.exists(cachePath)) {
+            console.log(`[DepCache] Cache already exists for ${type}:${cacheKey}`);
+            return true;
+        }
+
+        // Save to cache
+        await this.copyDir(depPath, cachePath);
+        console.log(`[DepCache] Saved ${type} deps to cache`);
+        return true;
+    }
+
+    async copyDir(src, dst) {
+        this.fs.mkdir(dst);
+        const entries = this.fs.readdir(src);
+
+        for (const entry of entries) {
+            const srcPath = `${src}/${entry.name}`;
+            const dstPath = `${dst}/${entry.name}`;
+
+            if (entry.isDirectory) {
+                await this.copyDir(srcPath, dstPath);
+            } else {
+                const data = this.fs.readFile(srcPath);
+                if (data) {
+                    this.fs.writeFile(dstPath, data);
+                }
+            }
+        }
+    }
+}
+```
+
+---
+
+## Deep Dive: Timing Breakdown
+
+### Target: <1s to Interactive
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Startup Timing Breakdown                             │
+│                                                                              │
+│   Phase                          Target     Technique                        │
+│   ─────                          ──────     ─────────                        │
+│                                                                              │
+│   1. Page load                   200ms      Service Worker cache             │
+│   2. Worker init                  50ms      Minimal JS, defer non-critical   │
+│   3. OPFS connect                 20ms      happy-opfs sync agent            │
+│   4. Check snapshot               10ms      manifest.json exists?            │
+│   5. Load TOC + CPU + devices    100ms      Always immediate                 │
+│   6. Start VM execution           50ms      Lazy memory, prefetch in bg      │
+│   7. Shell ready                 200ms      Pre-booted to shell prompt       │
+│   ─────────────────────────────────────                                      │
+│   Total                          630ms      ✓ Under 1s target                │
+│                                                                              │
+│   Background (non-blocking):                                                 │
+│   - Memory prefetch             1-3s        Based on boot profile            │
+│   - eStargz layer fetch         2-5s        Only if cache miss               │
+│   - Workspace sync check         50ms       Verify OPFS state                │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Optimization Techniques
+
+```javascript
+/**
+ * Startup Optimizer
+ *
+ * Coordinates all initialization for minimum time-to-interactive.
+ */
+class StartupOptimizer {
+    constructor() {
+        this.timings = {};
+    }
+
+    async optimizedStartup(options = {}) {
+        const t0 = performance.now();
+
+        // Phase 1-3: Parallel initialization
+        const [opfs, worker] = await Promise.all([
+            this.time('opfs_connect', () => initOPFS()),
+            this.time('worker_init', () => initWorker())
+        ]);
+
+        // Phase 4: Quick snapshot check
+        const hasSnapshot = await this.time('snapshot_check', () =>
+            opfs.s1.exists('/snapshots/manifests/current.json')
+        );
+
+        if (hasSnapshot) {
+            // Phase 5: Load critical state
+            const [toc, cpu, devices] = await this.time('load_state', () =>
+                Promise.all([
+                    this.loadTOC(opfs.s1),
+                    this.loadCPU(opfs.s1),
+                    this.loadDevices(opfs.s1)
+                ])
+            );
+
+            // Phase 6: Start VM with lazy memory
+            await this.time('vm_start', () =>
+                this.startVMWithLazyMemory(worker, { toc, cpu, devices })
+            );
+
+            // Background: Prefetch
+            this.prefetchInBackground(opfs.s1, toc);
+
+        } else {
+            // Cold start: boot from eStargz
+            await this.time('cold_boot', () =>
+                this.coldBootFromEStargz(worker, opfs)
+            );
+        }
+
+        // Phase 7: Wait for shell ready
+        await this.time('shell_ready', () =>
+            this.waitForShellPrompt(worker)
+        );
+
+        const total = performance.now() - t0;
+        console.log(`[Startup] Complete in ${total.toFixed(0)}ms`);
+        console.table(this.timings);
+
+        return total;
+    }
+
+    async time(name, fn) {
+        const start = performance.now();
+        const result = await fn();
+        this.timings[name] = performance.now() - start;
+        return result;
+    }
+
+    startVMWithLazyMemory(worker, state) {
+        // Don't wait for full memory load
+        // Just restore CPU + devices and start
+        worker.postMessage({
+            type: 'restore-lazy',
+            cpu: state.cpu,
+            devices: state.devices,
+            toc: state.toc
+        });
+
+        // Memory pages load on-demand via page faults
+        return Promise.resolve();
+    }
+
+    prefetchInBackground(fs, toc) {
+        // Non-blocking prefetch using idle callback
+        if ('requestIdleCallback' in self) {
+            requestIdleCallback(() => {
+                const profile = fs.readFile('/snapshots/profiles/boot.json');
+                if (profile) {
+                    const hashes = JSON.parse(new TextDecoder().decode(profile));
+                    this.prefetchChunks(fs, hashes);
+                }
+            });
+        }
+    }
+
+    async prefetchChunks(fs, hashes) {
+        for (const hash of hashes) {
+            // Load into CAS cache
+            const path = `/snapshots/cas/${hash.slice(0, 2)}/${hash}.gz`;
+            fs.readFile(path);  // Side effect: populates cache
+
+            // Yield to main thread
+            await new Promise(r => setTimeout(r, 0));
+        }
+    }
+
+    waitForShellPrompt(worker) {
+        return new Promise(resolve => {
+            const handler = (e) => {
+                if (e.data.type === 'shell-ready') {
+                    worker.removeEventListener('message', handler);
+                    resolve();
+                }
+            };
+            worker.addEventListener('message', handler);
+        });
+    }
+}
+```
+
+---
+
+## Complete XL-Lite File Structure
+
+```
+container2wasm/
+├── examples/wasi-browser/htdocs/
+│   ├── index.html                     # UI with snapshot controls
+│   ├── worker.js                      # Main emulator worker
+│   ├── xl-lite/                       # XL-Lite module
+│   │   ├── index.js                   # Main exports
+│   │   ├── cas.js                     # Content-Addressed Store
+│   │   ├── delta.js                   # Delta snapshot computer
+│   │   ├── prefetch.js                # Prefetch engine
+│   │   ├── manager.js                 # XL-Lite manager
+│   │   ├── overlay-fs.js              # COW overlay filesystem
+│   │   ├── estargz.js                 # eStargz layer manager
+│   │   ├── workspace-sync.js          # Hybrid sync strategy
+│   │   ├── dep-cache.js               # Dependency caching
+│   │   └── startup.js                 # Startup optimizer
+│   │
+│   ├── opfs-fs-backend.js             # S1 OPFS layer
+│   ├── opfs-worker.js                 # happy-opfs sync agent
+│   ├── 9p.js                          # v86 9P server (M1)
+│   └── ...
+│
+├── extras/
+│   └── codex-base/                    # Codex base image
+│       ├── Dockerfile                 # Multi-language dev environment
+│       └── build-estargz.sh           # Convert to eStargz
+│
+└── docs/
+    ├── XL_LITE_DESIGN.md              # This document
+    ├── OPFS_INTEGRATION.md
+    └── SNAPSHOT_OPFS_INTEGRATION.md
+```
+
+---
+
+## Implementation Roadmap
+
+```
+Week 1-2: Core Infrastructure
+├── [ ] ContentAddressedStore
+├── [ ] DeltaComputer
+├── [ ] Basic manifest format
+└── [ ] Integration tests
+
+Week 3-4: Snapshot Restore
+├── [ ] Lazy memory loading
+├── [ ] Boot profile recording
+├── [ ] Prefetch engine
+└── [ ] Startup optimizer
+
+Week 5-6: Overlay Filesystem
+├── [ ] Dual 9P mount
+├── [ ] COW layer manager
+├── [ ] eStargz integration
+└── [ ] Base image creation
+
+Week 7-8: Workspace Persistence
+├── [ ] Hybrid sync strategy
+├── [ ] Dependency cache
+├── [ ] Project switching
+└── [ ] End-to-end testing
+
+Total: ~8 weeks, ~3,000 LOC
+```
+
+---
+
+## Benchmark Targets
+
+| Metric | WebVM | XL-Lite Target | Method |
+|--------|-------|----------------|--------|
+| Cold start | 5-10s | 2-3s | eStargz + prefetch |
+| Warm start | 5-10s | <1s | Snapshot restore |
+| Shell ready | 5-10s | <1s | Pre-booted snapshot |
+| `npm install` (cached) | Full time | <5s | Dependency cache |
+| `python script.py` | 2-3s | <500ms | Interpreter in memory |
+| Page refresh | Full reload | <1s | Snapshot + workspace persist |
+| Storage (256MB VM) | N/A | 100-150MB | Deduplication + compression |
