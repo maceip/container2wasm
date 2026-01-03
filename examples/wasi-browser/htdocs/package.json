@@ -1,0 +1,13 @@
+{
+  "name": "wasi-browser-htdocs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:worker": "wtr --config ./web-test-runner.config.mjs"
+  },
+  "devDependencies": {
+    "@web/test-runner": "^0.16.1",
+    "@web/test-runner-playwright": "^0.10.0",
+    "chai": "^5.1.1"
+  }
+}

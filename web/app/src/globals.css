@@ -1,0 +1,432 @@
+@import "tailwindcss";
+
+@plugin "tailwindcss-animate";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* Mavericks ocean blue background */
+  --background: #1a6bb5;
+  --foreground: #1a1a1a;
+
+  /* Brushed metal window chrome */
+  --card: linear-gradient(180deg,
+    #e8e8e8 0%,
+    #d4d4d4 2%,
+    #e0e0e0 4%,
+    #d8d8d8 50%,
+    #c8c8c8 96%,
+    #b8b8b8 100%
+  );
+  --card-solid: #d8d8d8;
+  --card-foreground: #1a1a1a;
+
+  /* Popover with brushed metal */
+  --popover: #e4e4e4;
+  --popover-foreground: #1a1a1a;
+
+  /* Mavericks blue accent */
+  --primary: #2d7cd6;
+  --primary-foreground: #ffffff;
+
+  /* Secondary brushed metal */
+  --secondary: linear-gradient(180deg, #e4e4e4 0%, #d0d0d0 100%);
+  --secondary-solid: #dcdcdc;
+  --secondary-foreground: #1a1a1a;
+
+  /* Muted toolbar area */
+  --muted: linear-gradient(180deg, #e0e0e0 0%, #c8c8c8 100%);
+  --muted-solid: #d4d4d4;
+  --muted-foreground: #4a4a4a;
+
+  /* Accent colors */
+  --accent: #2d7cd6;
+  --accent-foreground: #ffffff;
+
+  /* Status colors */
+  --destructive: #ff5f57;
+  --destructive-foreground: #ffffff;
+  --info: #3b82f6;
+  --info-foreground: #ffffff;
+  --success: #28c840;
+  --success-foreground: #ffffff;
+  --warning: #ffbd2e;
+  --warning-foreground: #1a1a1a;
+
+  /* Opaque borders for crisp edges */
+  --border: rgba(0, 0, 0, 0.25);
+  --border-light: rgba(255, 255, 255, 0.5);
+  --border-dark: rgba(0, 0, 0, 0.35);
+
+  --input: rgba(0, 0, 0, 0.08);
+  --ring: #2d7cd6;
+
+  /* Window shadow */
+  --window-shadow: 0 10px 40px rgba(0, 0, 0, 0.35),
+                   0 0 1px rgba(0, 0, 0, 0.2);
+
+  /* Inset shadow for depth */
+  --inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5),
+                  inset 0 -1px 0 rgba(0, 0, 0, 0.1);
+
+  --radius: 6px;
+
+  /* Chart colors */
+  --chart-1: oklch(0.646 0.222 41.116);
+  --chart-2: oklch(0.6 0.118 184.704);
+  --chart-3: oklch(0.398 0.07 227.392);
+  --chart-4: oklch(0.828 0.189 84.429);
+  --chart-5: oklch(0.769 0.188 70.08);
+
+  /* Sidebar */
+  --sidebar: #e0e0e0;
+  --sidebar-foreground: #1a1a1a;
+  --sidebar-primary: #2d7cd6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #d0d0d0;
+  --sidebar-accent-foreground: #1a1a1a;
+  --sidebar-border: rgba(0, 0, 0, 0.15);
+  --sidebar-ring: #2d7cd6;
+}
+
+/* Dark mode - Mavericks-inspired dark theme */
+.dark {
+  /* Dark ocean background */
+  --background: #0a2a4a;
+  --foreground: #e8e8e8;
+
+  /* Dark brushed metal window chrome */
+  --card: linear-gradient(180deg,
+    #3a3a3a 0%,
+    #2d2d2d 2%,
+    #333333 4%,
+    #2a2a2a 50%,
+    #222222 96%,
+    #1a1a1a 100%
+  );
+  --card-solid: #2a2a2a;
+  --card-foreground: #e8e8e8;
+
+  /* Dark popover */
+  --popover: #2a2a2a;
+  --popover-foreground: #e8e8e8;
+
+  /* Mavericks blue accent (slightly brighter for dark) */
+  --primary: #3a8ee8;
+  --primary-foreground: #ffffff;
+
+  /* Dark secondary brushed metal */
+  --secondary: linear-gradient(180deg, #3a3a3a 0%, #2a2a2a 100%);
+  --secondary-solid: #333333;
+  --secondary-foreground: #e8e8e8;
+
+  /* Dark muted toolbar area */
+  --muted: linear-gradient(180deg, #333333 0%, #252525 100%);
+  --muted-solid: #2d2d2d;
+  --muted-foreground: #a0a0a0;
+
+  /* Accent colors */
+  --accent: #3a8ee8;
+  --accent-foreground: #ffffff;
+
+  /* Status colors (brighter for dark mode) */
+  --destructive: #ff6b6b;
+  --destructive-foreground: #ffffff;
+  --info: #5a9cf5;
+  --info-foreground: #ffffff;
+  --success: #4ade80;
+  --success-foreground: #ffffff;
+  --warning: #fbbf24;
+  --warning-foreground: #1a1a1a;
+
+  /* Dark borders */
+  --border: rgba(255, 255, 255, 0.15);
+  --border-light: rgba(255, 255, 255, 0.1);
+  --border-dark: rgba(0, 0, 0, 0.4);
+
+  --input: rgba(255, 255, 255, 0.08);
+  --ring: #3a8ee8;
+
+  /* Dark window shadow */
+  --window-shadow: 0 10px 40px rgba(0, 0, 0, 0.5),
+                   0 0 1px rgba(0, 0, 0, 0.3);
+
+  /* Dark inset shadow */
+  --inset-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1),
+                  inset 0 -1px 0 rgba(0, 0, 0, 0.2);
+
+  /* Sidebar dark */
+  --sidebar: #252525;
+  --sidebar-foreground: #e8e8e8;
+  --sidebar-primary: #3a8ee8;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #333333;
+  --sidebar-accent-foreground: #e8e8e8;
+  --sidebar-border: rgba(255, 255, 255, 0.1);
+  --sidebar-ring: #3a8ee8;
+}
+
+/* Mavericks ocean wave background */
+body {
+  font-family: -apple-system, "Lucida Grande", "Helvetica Neue", sans-serif;
+  background: linear-gradient(180deg,
+    #0f4c81 0%,
+    #1a6bb5 30%,
+    #2d8fd6 60%,
+    #1a6bb5 100%
+  );
+  background-attachment: fixed;
+  color: var(--foreground);
+  min-height: 100vh;
+}
+
+/* Dark mode ocean background */
+.dark body,
+body.dark {
+  background: linear-gradient(180deg,
+    #061a2e 0%,
+    #0a2a4a 30%,
+    #0d3a5c 60%,
+    #0a2a4a 100%
+  );
+}
+
+/* Brushed metal noise texture overlay */
+.brushed-metal {
+  position: relative;
+}
+.brushed-metal::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  opacity: 0.03;
+  pointer-events: none;
+  border-radius: inherit;
+}
+
+/* Traffic light buttons */
+.orb {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  position: relative;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.4),
+    inset 0 -1px 2px rgba(0, 0, 0, 0.2),
+    0 1px 2px rgba(0, 0, 0, 0.2);
+}
+
+.orb-close {
+  background: linear-gradient(180deg, #ff6058 0%, #e33e32 100%);
+  border: 1px solid #cf3a30;
+}
+.orb-close::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.orb-minimize {
+  background: linear-gradient(180deg, #ffbe30 0%, #e5a000 100%);
+  border: 1px solid #c79500;
+}
+.orb-minimize::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.orb-maximize {
+  background: linear-gradient(180deg, #28c940 0%, #1aab29 100%);
+  border: 1px solid #14962a;
+}
+.orb-maximize::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Window chrome styling */
+.window-chrome {
+  background: linear-gradient(180deg,
+    #e8e8e8 0%,
+    #d4d4d4 2%,
+    #e0e0e0 4%,
+    #d8d8d8 50%,
+    #c8c8c8 96%,
+    #b8b8b8 100%
+  );
+  border: 1px solid;
+  border-color: rgba(255, 255, 255, 0.5) rgba(0, 0, 0, 0.2) rgba(0, 0, 0, 0.25) rgba(0, 0, 0, 0.2);
+  box-shadow: var(--window-shadow);
+}
+
+/* Title bar styling */
+.title-bar {
+  background: linear-gradient(180deg,
+    #e8e8e8 0%,
+    #e0e0e0 50%,
+    #d0d0d0 100%
+  );
+  border-bottom: 1px solid rgba(0, 0, 0, 0.15);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+/* Content area with subtle inset */
+.content-area {
+  background: linear-gradient(180deg, #d4d4d4 0%, #e0e0e0 100%);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+/* Footer/status bar */
+.status-bar {
+  background: linear-gradient(180deg, #d8d8d8 0%, #c0c0c0 100%);
+  border-top: 1px solid rgba(0, 0, 0, 0.15);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.5);
+}
+
+/* Mavericks Finder-style tabs */
+.mavericks-tab-bar {
+  display: flex;
+  background: linear-gradient(180deg, #a0a0a0 0%, #888888 100%);
+  border-bottom: 1px solid rgba(0, 0, 0, 0.3);
+  padding: 0;
+  position: relative;
+}
+
+.mavericks-tab {
+  position: relative;
+  padding: 6px 24px 5px;
+  font-size: 11px;
+  font-weight: 500;
+  color: #333;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.3);
+  background: linear-gradient(180deg, #9a9a9a 0%, #7a7a7a 100%);
+  border: none;
+  cursor: pointer;
+  margin: 0;
+  clip-path: polygon(8px 0%, calc(100% - 8px) 0%, 100% 100%, 0% 100%);
+  margin-left: -4px;
+  transition: background 0.15s ease;
+}
+
+.mavericks-tab:first-child {
+  margin-left: 0;
+  clip-path: polygon(0% 0%, calc(100% - 8px) 0%, 100% 100%, 0% 100%);
+}
+
+.mavericks-tab:last-child {
+  clip-path: polygon(8px 0%, 100% 0%, 100% 100%, 0% 100%);
+}
+
+.mavericks-tab:hover:not(.mavericks-tab-active) {
+  background: linear-gradient(180deg, #a8a8a8 0%, #888888 100%);
+}
+
+.mavericks-tab-active {
+  background: linear-gradient(180deg, #e8e8e8 0%, #d0d0d0 100%);
+  color: #1a1a1a;
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.7);
+  z-index: 1;
+  box-shadow:
+    0 -1px 0 rgba(255, 255, 255, 0.5) inset,
+    1px 0 2px rgba(0, 0, 0, 0.1),
+    -1px 0 2px rgba(0, 0, 0, 0.1);
+}
+
+/* Tab dividers */
+.mavericks-tab::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: 4px;
+  bottom: 4px;
+  width: 1px;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.mavericks-tab:last-child::after,
+.mavericks-tab-active::after,
+.mavericks-tab-active + .mavericks-tab::after {
+  display: none;
+}
+
+@theme inline {
+  --animate-skeleton: skeleton 2s -1s infinite linear;
+  --color-warning-foreground: var(--warning-foreground);
+  --color-warning: var(--warning);
+  --color-success-foreground: var(--success-foreground);
+  --color-success: var(--success);
+  --color-info-foreground: var(--info-foreground);
+  --color-info: var(--info);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-destructive: var(--destructive);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted-solid);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary-solid);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card-solid);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 12px);
+  --radius-4xl: calc(var(--radius) + 16px);
+  @keyframes skeleton {
+  to {
+    background-position: -200% 0;
+    }
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply text-foreground;
+  }
+}

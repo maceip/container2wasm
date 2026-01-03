@@ -1,0 +1,15 @@
+{
+  "name": "opfs-virtio",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "opfs_virtio_bg.wasm",
+    "opfs_virtio.js",
+    "opfs_virtio.d.ts"
+  ],
+  "main": "opfs_virtio.js",
+  "types": "opfs_virtio.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

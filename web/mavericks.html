@@ -1,0 +1,481 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Mavericks Console</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#0d2f47" />
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.17.0/css/xterm.css">
+    <style>
+      :root {
+        --frame-metal-top: #d7dce1;
+        --frame-metal-bottom: #aeb4bb;
+        --frame-border: #5f6a75;
+        --orb-glow: #5ea7ff;
+        --orb-core: #2f7bff;
+        --background-ocean: linear-gradient(135deg, #0d2f47 0%, #0f3d5f 35%, #0d4c73 65%, #0a7b9d 100%);
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: -apple-system, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
+        background: var(--background-ocean);
+        color: #0b1321;
+        min-height: 100vh;
+        padding: 18px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .frame {
+        width: min(1100px, 100%);
+        min-height: 640px;
+        background: linear-gradient(180deg, var(--frame-metal-top) 0%, var(--frame-metal-bottom) 100%);
+        border: 1px solid var(--frame-border);
+        border-radius: 18px;
+        box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+        overflow: hidden;
+        display: grid;
+        grid-template-rows: 58px 1fr auto;
+      }
+      .chrome {
+        background: linear-gradient(180deg, #e9edf1 0%, #cdd4dc 100%);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+        display: flex;
+        align-items: center;
+        padding: 0 18px;
+        gap: 12px;
+      }
+      .orbs {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+      }
+      .orb {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: radial-gradient(circle at 30% 30%, #cde1ff 0%, var(--orb-core) 45%, #0e4fd6 100%);
+        box-shadow: 0 0 0 1px rgba(0,0,0,0.18), 0 6px 12px rgba(0, 87, 255, 0.38), 0 0 10px rgba(68,138,255,0.75);
+        position: relative;
+      }
+      .orb::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.65);
+        filter: blur(1px);
+      }
+      .title {
+        font-weight: 700;
+        letter-spacing: 0.5px;
+        color: #203247;
+        text-shadow: 0 1px 0 rgba(255,255,255,0.7);
+      }
+      .content {
+        display: grid;
+        grid-template-columns: 1fr 320px;
+        gap: 14px;
+        padding: 14px;
+      }
+      .panel {
+        background: linear-gradient(180deg, rgba(255,255,255,0.72), rgba(231,236,242,0.95));
+        border: 1px solid rgba(0,0,0,0.08);
+        border-radius: 14px;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.8);
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .terminal-shell {
+        background: #0d0f16;
+        border-radius: 10px;
+        padding: 10px;
+        height: 100%;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.05), 0 12px 24px rgba(0,0,0,0.24);
+      }
+      #terminal-root {
+        width: 100%;
+        height: clamp(320px, 56vh, 640px);
+      }
+      .controls {
+        display: grid;
+        gap: 10px;
+      }
+      .row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .btn {
+        border: 1px solid #3774d8;
+        background: linear-gradient(180deg, #6caeff, #3f8cff);
+        color: #fff;
+        border-radius: 10px;
+        padding: 10px 14px;
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.65), 0 8px 16px rgba(26, 98, 187, 0.28);
+        transition: transform 120ms ease, box-shadow 120ms ease;
+      }
+      .btn:active { transform: translateY(1px); box-shadow: inset 0 1px 0 rgba(255,255,255,0.65); }
+      .input {
+        flex: 1;
+        border-radius: 10px;
+        border: 1px solid #9aa8bb;
+        padding: 10px 12px;
+        font-size: 14px;
+        background: rgba(255,255,255,0.9);
+      }
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: rgba(11,55,101,0.08);
+        border: 1px solid rgba(26,74,137,0.22);
+        color: #0f2f54;
+        padding: 6px 10px;
+        border-radius: 10px;
+        font-weight: 700;
+        font-size: 13px;
+      }
+      .badge::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #2dd36f;
+        box-shadow: 0 0 8px rgba(45,211,111,0.7);
+      }
+      .status {
+        font-size: 13px;
+        color: #1c3550;
+        line-height: 1.4;
+      }
+      .snapshot {
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid rgba(0,0,0,0.08);
+        box-shadow: 0 10px 20px rgba(0,0,0,0.14);
+      }
+      footer {
+        padding: 12px 16px;
+        background: linear-gradient(180deg, #dfe4e9, #c9d1d9);
+        border-top: 1px solid rgba(0,0,0,0.08);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      @media (max-width: 1024px) {
+        .content { grid-template-columns: 1fr; }
+        .frame { min-height: 720px; }
+      }
+      @media (max-width: 640px) {
+        body { padding: 10px; }
+        .frame { min-height: 80vh; }
+        .chrome { padding: 0 12px; }
+        #terminal-root { height: 360px; }
+        .btn { width: 100%; text-align: center; }
+        .row { flex-direction: column; align-items: stretch; }
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+      }
+      .tab {
+        padding: 8px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(0,0,0,0.08);
+        background: linear-gradient(180deg, #eef2f6, #dfe5ec);
+        font-weight: 700;
+        cursor: pointer;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
+      }
+      .tab.active {
+        border-color: #3774d8;
+        color: #0f2f54;
+        box-shadow: inset 0 1px 0 rgba(255,255,255,0.9), 0 4px 10px rgba(26,98,187,0.18);
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm@4.17.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-pty@0.9.4/index.js"></script>
+    <script src="./dist/runcontainer.js"></script>
+    <script type="module">
+      const { useEffect, useRef, useState } = React;
+
+      const configureTermios = (slave) => {
+        let termios = slave.ioctl("TCGETS");
+        termios.iflag &= ~(ISTRIP | INLCR | IGNCR | ICRNL | IXON);
+        termios.oflag &= ~(OPOST);
+        termios.lflag &= ~(ECHO | ECHONL | ICANON | ISIG | IEXTEN);
+        slave.ioctl("TCSETS", new Termios(termios.iflag, termios.oflag, termios.cflag, termios.lflag, termios.cc));
+      };
+
+      const TerminalWindow = () => {
+        const termRef = useRef(null);
+        const masterRef = useRef(null);
+        const workerRef = useRef(null);
+        const containerRef = useRef(null);
+        const [status, setStatus] = useState("Booting VM...");
+        const [snapshot, setSnapshot] = useState("");
+        const [pendingCmd, setPendingCmd] = useState("");
+        const fontSizeRef = useRef(13);
+        const pinchRef = useRef(null);
+        const longPressTimer = useRef(null);
+        const [activeTab, setActiveTab] = useState("terminal");
+        const shareChannelRef = useRef(null);
+
+        useEffect(() => {
+          const term = new window.Terminal({
+            convertEol: true,
+            fontFamily: 'Menlo, Monaco, "SFMono-Regular", monospace',
+            fontSize: 13,
+            theme: { background: "#0d0f16" },
+            cursorBlink: true,
+          });
+          termRef.current = term;
+          term.open(containerRef.current);
+          try {
+            term.registerLinkMatcher(/https?:\/\/\S+/g, (e, link) => {
+              if (e && e.preventDefault) e.preventDefault();
+              // Use window.open to defer to system/browser on all platforms.
+              window.open(link, "_blank", "noopener,noreferrer");
+            });
+          } catch (e) {
+            console.warn("link matcher registration failed", e);
+          }
+
+          const { master, slave } = window.openpty();
+          masterRef.current = master;
+          configureTermios(slave);
+          term.loadAddon(master);
+
+          const worker = new Worker("./worker.js");
+          workerRef.current = worker;
+          const vmImage = location.origin + "/out.wasm.gzip";
+          const mounterImage = location.origin + "/imagemounter.wasm.gzip";
+          const stackWorkerFile = location.origin + "/dist/stack-worker.js";
+          const containerImageAddress = getImageParam();
+
+          RunContainer.createContainerWASI(vmImage, containerImageAddress, stackWorkerFile, mounterImage)
+            .then((info) => {
+              worker.postMessage({ type: "init", info, args: ["/bin/bash"] });
+              new TtyServer(slave).start(worker);
+              setStatus("Shell ready at /bin/bash — /mnt/opfs will bind once available.");
+            })
+            .catch((err) => {
+              console.error(err);
+              setStatus("Failed to start VM: " + err);
+            });
+
+          const captureCanvas = () => {
+            const canvas = containerRef.current?.querySelector(".xterm-screen canvas");
+            if (!canvas) return null;
+            return canvas.toDataURL("image/png");
+          };
+
+          // Expose hooks for automation / debugging.
+          window.mavericksTerminal = {
+            captureCanvas,
+            send: (text) => masterRef.current?.write(text),
+            worker,
+            term,
+          };
+
+          const resizeFont = (delta) => {
+            const next = Math.min(24, Math.max(10, fontSizeRef.current + delta));
+            fontSizeRef.current = next;
+            term.setOption("fontSize", next);
+            setStatus(`Font size: ${next}px`);
+          };
+
+          const copySelection = async () => {
+            const text = term.getSelection();
+            if (!text) return;
+            try {
+              if (navigator.clipboard?.writeText) {
+                await navigator.clipboard.writeText(text);
+                setStatus("Copied selection to clipboard");
+              } else {
+                setStatus("Selection ready — use system copy");
+              }
+            } catch (e) {
+              setStatus("Clipboard unavailable");
+            }
+          };
+
+          const handleWheel = (ev) => {
+            if (!ev.ctrlKey) return;
+            ev.preventDefault();
+            resizeFont(ev.deltaY > 0 ? -1 : 1);
+          };
+
+          const handleTouchStart = (ev) => {
+            if (ev.touches.length === 2) {
+              const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+              const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+              pinchRef.current = { start: Math.hypot(dx, dy) };
+              ev.preventDefault();
+            } else if (ev.touches.length === 1) {
+              clearTimeout(longPressTimer.current);
+              longPressTimer.current = setTimeout(() => {
+                copySelection();
+              }, 550);
+            }
+          };
+
+          const handleTouchMove = (ev) => {
+            if (pinchRef.current && ev.touches.length === 2) {
+              const dx = ev.touches[0].clientX - ev.touches[1].clientX;
+              const dy = ev.touches[0].clientY - ev.touches[1].clientY;
+              const dist = Math.hypot(dx, dy);
+              const scale = dist / pinchRef.current.start;
+              if (Math.abs(scale - 1) > 0.08) {
+                resizeFont(scale > 1 ? 1 : -1);
+                pinchRef.current.start = dist;
+              }
+              ev.preventDefault();
+            }
+          };
+
+          const handleTouchEnd = () => {
+            pinchRef.current = null;
+            clearTimeout(longPressTimer.current);
+          };
+
+          const hostEl = containerRef.current;
+          hostEl?.addEventListener("wheel", handleWheel, { passive: false });
+          hostEl?.addEventListener("touchstart", handleTouchStart, { passive: false });
+          hostEl?.addEventListener("touchmove", handleTouchMove, { passive: false });
+          hostEl?.addEventListener("touchend", handleTouchEnd);
+
+          if ("serviceWorker" in navigator) {
+            navigator.serviceWorker.register("./sw.js").catch((err) => console.warn("SW register failed", err));
+          }
+
+          // Listen for shared files from the service worker share target.
+          const bc = new BroadcastChannel("mavericks-share");
+          shareChannelRef.current = bc;
+          bc.onmessage = (event) => {
+            const msg = event.data;
+            if (msg && msg.type === "shared-files" && workerRef.current) {
+              workerRef.current.postMessage({ type: "add-opfs-files", files: msg.files || [] });
+              setStatus(`Imported ${msg.files?.length || 0} shared file(s) into OPFS`);
+            }
+          };
+
+          return () => {
+            worker?.terminate();
+            term?.dispose();
+            window.mavericksTerminal = undefined;
+            hostEl?.removeEventListener("wheel", handleWheel);
+            hostEl?.removeEventListener("touchstart", handleTouchStart);
+            hostEl?.removeEventListener("touchmove", handleTouchMove);
+            hostEl?.removeEventListener("touchend", handleTouchEnd);
+            clearTimeout(longPressTimer.current);
+            bc?.close();
+          };
+        }, []);
+
+        const sendCommand = () => {
+          if (!pendingCmd.trim() || !masterRef.current) return;
+          masterRef.current.write(pendingCmd + "\r");
+          setPendingCmd("");
+        };
+
+        const captureFrame = () => {
+          const canvas = containerRef.current?.querySelector(".xterm-screen canvas");
+          if (!canvas) return;
+          const data = canvas.toDataURL("image/png");
+          setSnapshot(data);
+          setStatus("Captured terminal frame to canvas data URL.");
+        };
+
+        return (
+          React.createElement("div", { className: "frame" },
+            React.createElement("div", { className: "chrome" },
+              React.createElement("div", { className: "orbs" },
+                React.createElement("div", { className: "orb" }),
+                React.createElement("div", { className: "orb" }),
+                React.createElement("div", { className: "orb" })
+              ),
+              React.createElement("div", { className: "title" }, "Mavericks Console"),
+              React.createElement("span", { className: "badge" }, "live")
+            ),
+              React.createElement("div", { className: "content" },
+              React.createElement("div", { className: "panel terminal-shell" },
+                activeTab === "terminal"
+                  ? React.createElement("div", { id: "terminal-root", ref: containerRef })
+                  : React.createElement("div", { style: { color: "#dfe7f5", lineHeight: 1.6 } },
+                      React.createElement("p", null, "OPFS mounts to ", React.createElement("code", null, "/mnt/opfs"), " when the third wasi2 device is present. Use the shell to verify with ", React.createElement("code", null, "mount | grep opfs"), " and ", React.createElement("code", null, "ls -l /mnt/opfs"), "."),
+                      React.createElement("p", null, "Automation hooks: ", React.createElement("code", null, "window.mavericksTerminal.send(\"ls -l /mnt/opfs\\r\")"), " and ", React.createElement("code", null, "window.mavericksTerminal.captureCanvas()"), ".")
+                    )
+              ),
+              React.createElement("div", { className: "panel" },
+                React.createElement("div", { className: "controls" },
+                  React.createElement("div", { className: "tabs" },
+                    ["terminal", "opfs"].map((t) =>
+                      React.createElement("div", {
+                        key: t,
+                        className: "tab" + (activeTab === t ? " active" : ""),
+                        onClick: () => setActiveTab(t)
+                      }, t === "terminal" ? "Terminal" : "OPFS notes")
+                    )
+                  ),
+                  React.createElement("div", { className: "status" }, status),
+                  React.createElement("div", { className: "row" },
+                    React.createElement("input", {
+                      className: "input",
+                      placeholder: "Type a command and send to the shell",
+                      value: pendingCmd,
+                      onChange: (e) => setPendingCmd(e.target.value),
+                      onKeyDown: (e) => { if (e.key === "Enter") sendCommand(); }
+                    }),
+                    React.createElement("button", { className: "btn", onClick: sendCommand }, "Send")
+                  ),
+                  React.createElement("button", { className: "btn", onClick: captureFrame }, "Capture Terminal Frame"),
+                  snapshot ? React.createElement("img", { className: "snapshot", src: snapshot, alt: "Terminal snapshot" }) : null
+                )
+              )
+            ),
+            React.createElement("footer", null,
+              React.createElement("div", { className: "status" },
+                "Canvas hook: use ", React.createElement("code", null, "window.mavericksTerminal.captureCanvas()"), " to grab PNG data."
+              ),
+              React.createElement("div", { className: "status" }, "Gestures: pinch to zoom font, long-press to copy selection, tap to focus • macOS Mavericks style")
+            )
+          )
+        );
+      };
+
+      const getImageParam = () => {
+        const vars = location.search.substring(1).split("&");
+        for (let i = 0; i < vars.length; i++) {
+          const kv = vars[i].split("=");
+          if (decodeURIComponent(kv[0]) === "image") {
+            return kv[1];
+          }
+        }
+        return null;
+      };
+
+      ReactDOM.createRoot(document.getElementById("app")).render(React.createElement(TerminalWindow));
+    </script>
+    <!-- Optional webbundle reference; build via webbundle/build-webbundle.js -->
+    <link rel="webbundle" href="./mavericks.wbn" scope="./">
+  </body>
+</html>
