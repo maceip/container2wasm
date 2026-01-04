@@ -762,8 +762,8 @@ RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
     MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 OPFS_PATH=/tmp/opfs envsubst > /out/args-before-cp.json && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack OPFS_PATH=/opfs envsubst > /out/args.json
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
 RUN echo "Module['arguments'] =" > /out/arg-module.js
 RUN cat /out/args.json >> /out/arg-module.js
 RUN echo ";" >> /out/arg-module.js
@@ -779,8 +779,8 @@ RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
     MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 OPFS_PATH=/tmp/opfs envsubst > /out/args-before-cp.json && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack OPFS_PATH=/opfs envsubst > /out/args.json
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
 RUN echo "Module['arguments'] =" > /out/arg-module.js
 RUN cat /out/args.json >> /out/arg-module.js
 RUN echo ";" >> /out/arg-module.js
@@ -796,8 +796,8 @@ RUN MIGRATION_FLAGS= ; \
     if test "${QEMU_MIGRATION}" = "true"  ; then \
     MIGRATION_FLAGS='"-incoming", "file:/pack/vm.state",' ; \
     fi && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 OPFS_PATH=/tmp/opfs envsubst > /out/args-before-cp.json && \
-    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack OPFS_PATH=/opfs envsubst > /out/args.json
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION="" WASI0_PATH=/tmp/wasi0 WASI1_PATH=/tmp/wasi1 envsubst > /out/args-before-cp.json && \
+    cat /args.json.template | LOGLEVEL=$LINUX_LOGLEVEL MEMORY_SIZE=$VM_MEMORY_SIZE_MB CORE_NUMS=$VM_CORE_NUMS MIGRATION=$MIGRATION_FLAGS WASI0_PATH=/ WASI1_PATH=/pack envsubst > /out/args.json
 RUN echo "Module['arguments'] =" > /out/arg-module.js
 RUN cat /out/args.json >> /out/arg-module.js
 RUN echo ";" >> /out/arg-module.js
