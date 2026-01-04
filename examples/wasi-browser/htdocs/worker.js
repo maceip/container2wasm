@@ -1,5 +1,5 @@
 import { initOPFS, getS1Filesystem, getM1Filesystem } from './opfs-fs-backend.js';
-import { PreopenDirectory, OpenFile, File } from './browser_wasi_shim/index.js';
+import { PreopenDirectory, OpenFile, File, Fd } from './browser_wasi_shim/index.js';
 import './browser_wasi_shim/wasi_defs.js';
 import {
     registerSocketBuffer, serveIfInitMsg, getImagename, errStatus,
@@ -11,6 +11,144 @@ import {
 } from './snapshot-manager.js';
 import { P9Protocol } from './p9-protocol.js';
 import "https://cdn.jsdelivr.net/npm/xterm-pty@0.9.4/workerTools.js";
+
+// ============================================================
+// OPFS Disk Image Support (Synchronous via FileSystemSyncAccessHandle)
+// ============================================================
+
+const WASI_ERRNO_SUCCESS = 0;
+const WASI_FILETYPE_REGULAR_FILE = 4;
+const WASI_FILETYPE_DIRECTORY = 3;
+
+// Custom File Descriptor that wraps the OPFS SyncAccessHandle for disk.img
+class OpfsFd extends Fd {
+    constructor(accessHandle) {
+        super();
+        this.handle = accessHandle;
+        this.pos = 0;
+    }
+
+    fd_fdstat_get() {
+        return {
+            ret: WASI_ERRNO_SUCCESS,
+            fdstat: { fs_filetype: WASI_FILETYPE_REGULAR_FILE, fs_flags: 0 }
+        };
+    }
+
+    fd_filestat_get() {
+        return {
+            ret: WASI_ERRNO_SUCCESS,
+            filestat: {
+                filetype: WASI_FILETYPE_REGULAR_FILE,
+                size: BigInt(this.handle.getSize())
+            }
+        };
+    }
+
+    fd_read(view8, iovs) {
+        let nread = 0;
+        for (const iovec of iovs) {
+            const dest = new Uint8Array(view8.buffer, view8.byteOffset + iovec.buf, iovec.buf_len);
+            const bytesRead = this.handle.read(dest, { at: this.pos });
+            this.pos += bytesRead;
+            nread += bytesRead;
+            if (bytesRead < iovec.buf_len) break;
+        }
+        return { ret: WASI_ERRNO_SUCCESS, nread };
+    }
+
+    fd_write(view8, iovs) {
+        let nwritten = 0;
+        for (const iovec of iovs) {
+            const src = new Uint8Array(view8.buffer, view8.byteOffset + iovec.buf, iovec.buf_len);
+            const bytesWritten = this.handle.write(src, { at: this.pos });
+            this.pos += bytesWritten;
+            nwritten += bytesWritten;
+        }
+        this.handle.flush();
+        return { ret: WASI_ERRNO_SUCCESS, nwritten };
+    }
+
+    fd_seek(offset, whence) {
+        let base = 0n;
+        if (whence === 0) base = 0n; // SEEK_SET
+        else if (whence === 1) base = BigInt(this.pos); // SEEK_CUR
+        else if (whence === 2) base = BigInt(this.handle.getSize()); // SEEK_END
+
+        this.pos = Number(base + offset);
+        return { ret: WASI_ERRNO_SUCCESS, offset: BigInt(this.pos) };
+    }
+
+    fd_sync() {
+        this.handle.flush();
+        return WASI_ERRNO_SUCCESS;
+    }
+
+    fd_close() {
+        this.handle.close();
+        return WASI_ERRNO_SUCCESS;
+    }
+}
+
+// Custom Directory that exposes disk.img file
+class OpfsMountDir extends PreopenDirectory {
+    constructor(mountPoint, filename, fd) {
+        super(mountPoint, {});
+        this.filename = filename;
+        this.opfsFd = fd;
+    }
+
+    path_open(dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fd_flags) {
+        if (path === this.filename) {
+            return { ret: WASI_ERRNO_SUCCESS, fd_obj: this.opfsFd };
+        }
+        return super.path_open(dirflags, path, oflags, fs_rights_base, fs_rights_inheriting, fd_flags);
+    }
+
+    fd_readdir_single(cookie) {
+        if (cookie >= 1n) return { ret: 0, dirent: null };
+        return {
+            ret: 0,
+            dirent: {
+                d_next: 1n,
+                d_ino: 1n,
+                dir_name: new TextEncoder().encode(this.filename),
+                d_type: WASI_FILETYPE_REGULAR_FILE,
+                length() { return 24 + this.dir_name.byteLength; },
+                write_bytes(view, buf, offset) {
+                    view.setBigUint64(offset, this.d_next, true);
+                    view.setBigUint64(offset + 8, this.d_ino, true);
+                    view.setUint32(offset + 16, this.dir_name.length, true);
+                    view.setUint8(offset + 20, this.d_type);
+                    buf.set(this.dir_name, offset + 24);
+                }
+            }
+        };
+    }
+
+    path_filestat_get(flags, path) {
+        if (path === this.filename) {
+            return this.opfsFd.fd_filestat_get();
+        }
+        return { ret: -1, filestat: null };
+    }
+}
+
+// Initialize OPFS disk image (100MB default)
+async function initOpfsDiskImage(sizeMB = 100) {
+    const opfsRoot = await navigator.storage.getDirectory();
+    const fileHandle = await opfsRoot.getFileHandle("disk.img", { create: true });
+    const accessHandle = await fileHandle.createSyncAccessHandle();
+
+    // Initialize to specified size if empty
+    if (accessHandle.getSize() === 0) {
+        console.log(`[OPFS] Creating ${sizeMB}MB disk image...`);
+        accessHandle.truncate(sizeMB * 1024 * 1024);
+    }
+
+    console.log(`[OPFS] disk.img ready (${accessHandle.getSize()} bytes)`);
+    return accessHandle;
+}
 
 // ============================================================
 // OPFS Integration
@@ -269,14 +407,26 @@ self.onmessage = async (msg) => {
     }
 
     const { s1, opfs9pServer: server } = await opfsReady;
+
+    // Initialize OPFS disk image for guest mounting
+    let opfsDiskMount = null;
+    try {
+        const diskHandle = await initOpfsDiskImage(100); // 100MB disk
+        const diskFd = new OpfsFd(diskHandle);
+        opfsDiskMount = new OpfsMountDir("/opfs", "disk.img", diskFd);
+        console.log('[OPFS] Disk image mount ready at /opfs/disk.img');
+    } catch (err) {
+        console.warn('[OPFS] Failed to initialize disk image:', err);
+    }
+
     self.postMessage({ type: 'opfs-ready' });
-    
+
     self.handle9PMessage = handle9PMessage;
 
     var ttyClient = new TtyClient(msg.data);
-    
+
     const opfsRootDir = new OPFSDirectory(s1, '/');
-    
+
     var args = [];
     var env = [];
     var fds = [
@@ -286,9 +436,15 @@ self.onmessage = async (msg) => {
         new PreopenDirectory("/", opfsRootDir), // S1: OPFS-backed root
     ];
 
+    // Add OPFS disk mount if available
+    if (opfsDiskMount) {
+        fds.push(opfsDiskMount); // fd 4: /opfs containing disk.img
+    }
+
     var netParam = getNetParam();
-    var listenfd = 4;
-    
+    // listenfd is the next available fd after all preopened directories
+    var listenfd = fds.length;
+
     fetch(getImagename(), { credentials: 'same-origin' }).then((resp) => {
         resp['arrayBuffer']().then((wasm) => {
             if (netParam) {
@@ -297,8 +453,9 @@ self.onmessage = async (msg) => {
                 } else if (netParam.mode == 'browser') {
                      recvCert().then((cert) => {
                         var certDir = getCertDir(cert);
-                        fds[4] = certDir; // Add cert dir
-                        args = ['arg0', '--net=socket=listenfd=5', '--mac', genmac()];
+                        fds.push(certDir); // Add cert dir at next available fd
+                        const certFd = fds.length - 1;
+                        args = ['arg0', `--net=socket=listenfd=${certFd + 1}`, '--mac', genmac()];
                         env = [
                             "SSL_CERT_FILE=/.wasmenv/proxy.crt",
                             "https_proxy=http://192.168.127.253:80",
@@ -306,13 +463,12 @@ self.onmessage = async (msg) => {
                             "HTTPS_PROXY=http://192.168.127.253:80",
                             "HTTP_PROXY=http://192.168.127.253:80"
                         ];
-                        listenfd = 5;
-                        startWasi(wasm, ttyClient, args, env, fds, listenfd, 6);
+                        startWasi(wasm, ttyClient, args, env, fds, certFd + 1, certFd + 2);
                     });
                     return;
                 }
             }
-            startWasi(wasm, ttyClient, args, env, fds, listenfd, 6);
+            startWasi(wasm, ttyClient, args, env, fds, listenfd, listenfd + 1);
         });
     }).catch(e => {
         console.error(e);
